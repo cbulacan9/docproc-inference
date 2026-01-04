@@ -1,12 +1,10 @@
 """Health check endpoints."""
 
 import logging
-from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from ..config import Settings, get_settings
 from ..services.runpod_client import RunPodClient
 
 logger = logging.getLogger(__name__)
@@ -28,41 +26,35 @@ class HealthResponse(BaseModel):
     endpoints: dict[str, EndpointHealth]
 
 
+def get_runpod_client(request: Request) -> RunPodClient:
+    """Get shared RunPod client from app state."""
+    return request.app.state.runpod_client
+
+
 @router.get("/health", response_model=HealthResponse)
-async def health_check(
-    settings: Annotated[Settings, Depends(get_settings)]
-) -> HealthResponse:
+async def health_check(request: Request) -> HealthResponse:
     """
     Check health of gateway and inference endpoints.
 
     No authentication required.
     """
-    client = RunPodClient(
-        api_key=settings.runpod_api_key,
-        classify_endpoint=settings.runpod_classify_endpoint,
-        extract_endpoint=settings.runpod_extract_endpoint
+    client = get_runpod_client(request)
+    endpoint_health = await client.health_check()
+
+    # Determine overall status
+    all_healthy = all(
+        ep.get("status") in ("healthy", "idle")
+        for ep in endpoint_health.values()
     )
 
-    try:
-        endpoint_health = await client.health_check()
-
-        # Determine overall status
-        all_healthy = all(
-            ep.get("status") in ("healthy", "idle")
-            for ep in endpoint_health.values()
-        )
-
-        return HealthResponse(
-            status="healthy" if all_healthy else "degraded",
-            gateway="healthy",
-            endpoints={
-                name: EndpointHealth(**data)
-                for name, data in endpoint_health.items()
-            }
-        )
-
-    finally:
-        await client.close()
+    return HealthResponse(
+        status="healthy" if all_healthy else "degraded",
+        gateway="healthy",
+        endpoints={
+            name: EndpointHealth(**data)
+            for name, data in endpoint_health.items()
+        }
+    )
 
 
 @router.get("/ready")
