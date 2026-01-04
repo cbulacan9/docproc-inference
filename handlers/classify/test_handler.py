@@ -4,12 +4,22 @@ Tests for the classification handler.
 Run with: pytest test_handler.py -v
 """
 
-import json
+import math
 import pytest
 from unittest.mock import patch, MagicMock
 from io import BytesIO
 
 import requests
+
+# Module-level imports for handler functions (reduces repetition)
+from handler import (
+    parse_json_response,
+    validate_classification_result,
+    build_classification_prompt,
+    fetch_image,
+    classify,
+    handler,
+)
 
 
 # =============================================================================
@@ -21,8 +31,6 @@ class TestParseJsonResponse:
 
     def test_parse_markdown_json_code_block(self):
         """Test parsing JSON from markdown code block with json specifier."""
-        from handler import parse_json_response
-
         text = '```json\n{"type": "W2", "confidence": 0.95}\n```'
         result = parse_json_response(text)
         assert result["type"] == "W2"
@@ -30,8 +38,6 @@ class TestParseJsonResponse:
 
     def test_parse_raw_json(self):
         """Test parsing raw JSON without code blocks."""
-        from handler import parse_json_response
-
         text = '{"type": "bank_statement", "confidence": 0.87}'
         result = parse_json_response(text)
         assert result["type"] == "bank_statement"
@@ -39,39 +45,29 @@ class TestParseJsonResponse:
 
     def test_parse_json_with_surrounding_text(self):
         """Test parsing JSON embedded in extra text."""
-        from handler import parse_json_response
-
         text = 'Here is the result:\n{"type": "invoice", "confidence": 0.9}\nDone.'
         result = parse_json_response(text)
         assert result["type"] == "invoice"
 
     def test_parse_code_block_without_json_specifier(self):
         """Test parsing JSON from code block without language specifier."""
-        from handler import parse_json_response
-
         text = '```\n{"type": "receipt", "confidence": 0.85}\n```'
         result = parse_json_response(text)
         assert result["type"] == "receipt"
 
     def test_parse_invalid_json_returns_empty_dict(self):
         """Test that invalid JSON returns empty dict."""
-        from handler import parse_json_response
-
         text = 'This is not JSON at all'
         result = parse_json_response(text)
         assert result == {}
 
     def test_parse_empty_string(self):
         """Test parsing empty string returns empty dict."""
-        from handler import parse_json_response
-
         result = parse_json_response('')
         assert result == {}
 
     def test_parse_json_with_nested_objects(self):
         """Test parsing JSON with nested structure."""
-        from handler import parse_json_response
-
         text = '{"type": "W2", "confidence": 0.9, "metadata": {"page": 1}}'
         result = parse_json_response(text)
         assert result["type"] == "W2"
@@ -87,8 +83,6 @@ class TestValidateClassificationResult:
 
     def test_valid_result_passes_through(self):
         """Test that valid results pass through unchanged."""
-        from handler import validate_classification_result
-
         result = validate_classification_result({
             "type": "W2",
             "confidence": 0.95,
@@ -100,8 +94,6 @@ class TestValidateClassificationResult:
 
     def test_invalid_type_defaults_to_other(self):
         """Test that invalid document types default to 'other'."""
-        from handler import validate_classification_result
-
         result = validate_classification_result({
             "type": "invalid_type",
             "confidence": 0.8
@@ -110,8 +102,6 @@ class TestValidateClassificationResult:
 
     def test_confidence_too_high_clamps_to_one(self):
         """Test that confidence > 1.0 is clamped to 1.0."""
-        from handler import validate_classification_result
-
         result = validate_classification_result({
             "type": "W2",
             "confidence": 1.5
@@ -120,8 +110,6 @@ class TestValidateClassificationResult:
 
     def test_confidence_too_low_clamps_to_zero(self):
         """Test that confidence < 0.0 is clamped to 0.0."""
-        from handler import validate_classification_result
-
         result = validate_classification_result({
             "type": "W2",
             "confidence": -0.5
@@ -130,8 +118,6 @@ class TestValidateClassificationResult:
 
     def test_non_numeric_confidence_defaults(self):
         """Test that non-numeric confidence defaults to 0.5."""
-        from handler import validate_classification_result
-
         result = validate_classification_result({
             "type": "W2",
             "confidence": "high"
@@ -140,8 +126,6 @@ class TestValidateClassificationResult:
 
     def test_missing_fields_get_defaults(self):
         """Test that missing fields receive default values."""
-        from handler import validate_classification_result
-
         result = validate_classification_result({})
         assert result["type"] == "other"
         assert result["confidence"] == 0.5
@@ -154,20 +138,42 @@ class TestValidateClassificationResult:
     ])
     def test_all_valid_document_types(self, doc_type):
         """Test that all valid document types are accepted."""
-        from handler import validate_classification_result
-
         result = validate_classification_result({"type": doc_type})
         assert result["type"] == doc_type
 
     def test_none_confidence_defaults(self):
         """Test that None confidence defaults to 0.5."""
-        from handler import validate_classification_result
-
         result = validate_classification_result({
             "type": "W2",
             "confidence": None
         })
         assert result["confidence"] == 0.5
+
+    def test_nan_confidence_clamps_to_one(self):
+        """Test that NaN confidence clamps to 1.0 due to min/max behavior."""
+        result = validate_classification_result({
+            "type": "W2",
+            "confidence": float('nan')
+        })
+        # NaN passes float() but min(1.0, nan) returns 1.0 in Python
+        # This is current behavior - if NaN should default to 0.5, handler needs updating
+        assert result["confidence"] == 1.0
+
+    def test_positive_inf_confidence_clamps_to_one(self):
+        """Test that positive infinity confidence clamps to 1.0."""
+        result = validate_classification_result({
+            "type": "W2",
+            "confidence": float('inf')
+        })
+        assert result["confidence"] == 1.0
+
+    def test_negative_inf_confidence_clamps_to_zero(self):
+        """Test that negative infinity confidence clamps to 0.0."""
+        result = validate_classification_result({
+            "type": "W2",
+            "confidence": float('-inf')
+        })
+        assert result["confidence"] == 0.0
 
 
 # =============================================================================
@@ -179,8 +185,6 @@ class TestBuildClassificationPrompt:
 
     def test_prompt_contains_document_types(self):
         """Test that prompt contains all document types."""
-        from handler import build_classification_prompt
-
         prompt = build_classification_prompt()
         assert "W2" in prompt
         assert "1099-INT" in prompt
@@ -191,8 +195,6 @@ class TestBuildClassificationPrompt:
 
     def test_prompt_requests_json_format(self):
         """Test that prompt requests JSON output format."""
-        from handler import build_classification_prompt
-
         prompt = build_classification_prompt()
         assert "JSON" in prompt
         assert "type" in prompt
@@ -201,8 +203,6 @@ class TestBuildClassificationPrompt:
 
     def test_prompt_is_non_empty(self):
         """Test that prompt is not empty."""
-        from handler import build_classification_prompt
-
         prompt = build_classification_prompt()
         assert len(prompt) > 100
 
@@ -214,9 +214,8 @@ class TestBuildClassificationPrompt:
 class TestFetchImage:
     """Tests for image fetching from URLs."""
 
-    def test_fetch_image_success(self, mock_successful_response, valid_image_bytes):
+    def test_fetch_image_success(self, mock_successful_response):
         """Test successful image fetch."""
-        from handler import fetch_image
         from PIL import Image
 
         with patch('handler.requests.get', return_value=mock_successful_response):
@@ -226,32 +225,24 @@ class TestFetchImage:
 
     def test_fetch_image_http_error(self, mock_http_error_response):
         """Test fetch_image raises ValueError on HTTP error."""
-        from handler import fetch_image
-
         with patch('handler.requests.get', return_value=mock_http_error_response):
             with pytest.raises(ValueError, match="Failed to fetch image"):
                 fetch_image("https://example.com/notfound.png")
 
     def test_fetch_image_timeout(self):
         """Test fetch_image raises ValueError on timeout."""
-        from handler import fetch_image
-
         with patch('handler.requests.get', side_effect=requests.Timeout("Connection timed out")):
             with pytest.raises(ValueError, match="Failed to fetch image"):
                 fetch_image("https://example.com/slow.png", timeout=1)
 
     def test_fetch_image_connection_error(self):
         """Test fetch_image raises ValueError on connection error."""
-        from handler import fetch_image
-
         with patch('handler.requests.get', side_effect=requests.ConnectionError("Network unreachable")):
             with pytest.raises(ValueError, match="Failed to fetch image"):
                 fetch_image("https://example.com/image.png")
 
     def test_fetch_image_invalid_image_data(self):
         """Test fetch_image raises ValueError on invalid image data."""
-        from handler import fetch_image
-
         mock_response = MagicMock()
         mock_response.content = b"not an image"
         mock_response.raise_for_status = MagicMock()
@@ -262,8 +253,6 @@ class TestFetchImage:
 
     def test_fetch_image_uses_provided_timeout(self, valid_image_bytes):
         """Test that fetch_image uses the provided timeout value."""
-        from handler import fetch_image
-
         mock_response = MagicMock()
         mock_response.content = valid_image_bytes
         mock_response.raise_for_status = MagicMock()
@@ -271,6 +260,42 @@ class TestFetchImage:
         with patch('handler.requests.get', return_value=mock_response) as mock_get:
             fetch_image("https://example.com/image.png", timeout=60)
             mock_get.assert_called_once_with("https://example.com/image.png", timeout=60)
+
+    def test_fetch_image_converts_rgba_to_rgb(self, rgba_image_bytes):
+        """Test that RGBA images are converted to RGB."""
+        from PIL import Image
+
+        mock_response = MagicMock()
+        mock_response.content = rgba_image_bytes
+        mock_response.raise_for_status = MagicMock()
+
+        with patch('handler.requests.get', return_value=mock_response):
+            image = fetch_image("https://example.com/image.png")
+            assert image.mode == 'RGB'
+
+    def test_fetch_image_converts_grayscale_to_rgb(self, grayscale_image_bytes):
+        """Test that grayscale images are converted to RGB."""
+        from PIL import Image
+
+        mock_response = MagicMock()
+        mock_response.content = grayscale_image_bytes
+        mock_response.raise_for_status = MagicMock()
+
+        with patch('handler.requests.get', return_value=mock_response):
+            image = fetch_image("https://example.com/image.png")
+            assert image.mode == 'RGB'
+
+    def test_fetch_image_converts_palette_to_rgb(self, palette_image_bytes):
+        """Test that palette (P mode) images are converted to RGB."""
+        from PIL import Image
+
+        mock_response = MagicMock()
+        mock_response.content = palette_image_bytes
+        mock_response.raise_for_status = MagicMock()
+
+        with patch('handler.requests.get', return_value=mock_response):
+            image = fetch_image("https://example.com/image.png")
+            assert image.mode == 'RGB'
 
 
 # =============================================================================
@@ -282,8 +307,6 @@ class TestHandler:
 
     def test_handler_success(self, sample_job, sample_classification_result):
         """Test successful handler execution."""
-        from handler import handler
-
         with patch('handler.classify', return_value=sample_classification_result):
             result = handler(sample_job)
 
@@ -294,8 +317,6 @@ class TestHandler:
 
     def test_handler_missing_image_urls(self):
         """Test handler returns error when image_urls is missing."""
-        from handler import handler
-
         job = {"input": {}}
         result = handler(job)
 
@@ -304,8 +325,6 @@ class TestHandler:
 
     def test_handler_empty_image_urls(self):
         """Test handler returns error when image_urls is empty."""
-        from handler import handler
-
         job = {"input": {"image_urls": []}}
         result = handler(job)
 
@@ -314,8 +333,6 @@ class TestHandler:
 
     def test_handler_empty_input(self):
         """Test handler handles empty input dict."""
-        from handler import handler
-
         job = {}
         result = handler(job)
 
@@ -323,8 +340,6 @@ class TestHandler:
 
     def test_handler_value_error(self, sample_job):
         """Test handler catches ValueError and returns error dict."""
-        from handler import handler
-
         with patch('handler.classify', side_effect=ValueError("Test error")):
             result = handler(sample_job)
 
@@ -333,8 +348,6 @@ class TestHandler:
 
     def test_handler_general_exception(self, sample_job):
         """Test handler catches general exceptions and returns error dict."""
-        from handler import handler
-
         with patch('handler.classify', side_effect=RuntimeError("Unexpected error")):
             result = handler(sample_job)
 
@@ -343,8 +356,6 @@ class TestHandler:
 
     def test_handler_passes_custom_prompt(self, sample_job_with_prompt, sample_classification_result):
         """Test handler passes custom prompt to classify."""
-        from handler import handler
-
         with patch('handler.classify', return_value=sample_classification_result) as mock_classify:
             handler(sample_job_with_prompt)
 
@@ -355,8 +366,6 @@ class TestHandler:
 
     def test_handler_latency_is_positive(self, sample_job, sample_classification_result):
         """Test handler latency is a positive number."""
-        from handler import handler
-
         with patch('handler.classify', return_value=sample_classification_result):
             result = handler(sample_job)
 
@@ -372,16 +381,12 @@ class TestClassify:
 
     def test_classify_empty_urls_raises_error(self):
         """Test classify raises ValueError when image_urls is empty."""
-        from handler import classify
-
         with patch('handler.load_model'):
             with pytest.raises(ValueError, match="No image URLs provided"):
                 classify([])
 
     def test_classify_uses_first_url_only(self, valid_image_bytes):
         """Test classify only uses the first URL from the list."""
-        from handler import classify
-
         mock_response = MagicMock()
         mock_response.content = valid_image_bytes
         mock_response.raise_for_status = MagicMock()
@@ -413,8 +418,6 @@ class TestClassify:
 
     def test_classify_uses_default_prompt(self, valid_image_bytes):
         """Test classify uses default prompt when none provided."""
-        from handler import classify, build_classification_prompt
-
         mock_response = MagicMock()
         mock_response.content = valid_image_bytes
         mock_response.raise_for_status = MagicMock()
@@ -437,7 +440,7 @@ class TestClassify:
             mock_processor.batch_decode.return_value = ['{"type": "invoice", "confidence": 0.8}']
             mock_processor.tokenizer.pad_token_id = 0
 
-            result = classify(["https://example.com/doc.png"])
+            classify(["https://example.com/doc.png"])
 
             # Check apply_chat_template was called with default prompt content
             call_args = mock_processor.apply_chat_template.call_args[0][0]
@@ -447,8 +450,6 @@ class TestClassify:
 
     def test_classify_uses_custom_prompt(self, valid_image_bytes):
         """Test classify uses custom prompt when provided."""
-        from handler import classify
-
         mock_response = MagicMock()
         mock_response.content = valid_image_bytes
         mock_response.raise_for_status = MagicMock()
@@ -483,8 +484,6 @@ class TestClassify:
 
     def test_classify_returns_validated_result(self, valid_image_bytes):
         """Test classify returns a validated result."""
-        from handler import classify
-
         mock_response = MagicMock()
         mock_response.content = valid_image_bytes
         mock_response.raise_for_status = MagicMock()
@@ -538,6 +537,51 @@ class TestLoadModel:
             with patch('transformers.Qwen2VLForConditionalGeneration') as mock_qwen:
                 handler.load_model()
                 mock_qwen.from_pretrained.assert_not_called()
+
+        finally:
+            # Restore globals
+            handler.MODEL = original_model
+            handler.PROCESSOR = original_processor
+
+    def test_load_model_happy_path(self):
+        """Test that load_model correctly initializes MODEL and PROCESSOR."""
+        import handler
+        import sys
+
+        # Reset globals to None to trigger loading
+        original_model = handler.MODEL
+        original_processor = handler.PROCESSOR
+
+        try:
+            handler.MODEL = None
+            handler.PROCESSOR = None
+
+            mock_model_instance = MagicMock()
+            mock_processor_instance = MagicMock()
+            mock_torch = MagicMock()
+            mock_torch.float16 = "float16"
+
+            with patch.dict(sys.modules, {'torch': mock_torch}), \
+                 patch('transformers.Qwen2VLForConditionalGeneration') as mock_qwen, \
+                 patch('transformers.AutoProcessor') as mock_auto_processor:
+
+                mock_qwen.from_pretrained.return_value = mock_model_instance
+                mock_auto_processor.from_pretrained.return_value = mock_processor_instance
+
+                handler.load_model()
+
+                # Verify from_pretrained was called with correct model name
+                mock_qwen.from_pretrained.assert_called_once()
+                call_args = mock_qwen.from_pretrained.call_args
+                assert "Qwen/Qwen2.5-VL-7B-Instruct" in call_args[0]
+
+                mock_auto_processor.from_pretrained.assert_called_once()
+                call_args = mock_auto_processor.from_pretrained.call_args
+                assert "Qwen/Qwen2.5-VL-7B-Instruct" in call_args[0]
+
+                # Verify globals were set
+                assert handler.MODEL is mock_model_instance
+                assert handler.PROCESSOR is mock_processor_instance
 
         finally:
             # Restore globals
