@@ -14,8 +14,8 @@ vllm serve ${MODEL_NAME:-rednote-hilab/dots.ocr} \
     --host 0.0.0.0 \
     --port ${VLLM_PORT:-8000} \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
-    --max-model-len 24000 \
+    --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.95} \
+    --max-model-len ${MAX_MODEL_LEN:-24000} \
     --dtype float16 \
     &
 

@@ -108,6 +108,8 @@ async def call_vllm(
     Raises:
         ValueError: If vLLM call fails
     """
+    if prompt_mode not in PROMPT_MODES:
+        logger.warning(f"Invalid prompt_mode '{prompt_mode}', falling back to 'layout_all'")
     prompt = PROMPT_MODES.get(prompt_mode, PROMPT_MODES["layout_all"])
 
     async with httpx.AsyncClient(timeout=120.0) as client:
@@ -304,8 +306,14 @@ async def extract(
         except ValueError as e:
             logger.warning(f"Skipping page {i+1}: {e}")
             continue
+        except httpx.RequestError as e:
+            logger.error(f"vLLM connection error on page {i+1}: {e}")
+            continue
+        except httpx.HTTPStatusError as e:
+            logger.error(f"vLLM HTTP error on page {i+1}: {e}")
+            continue
         except Exception as e:
-            logger.error(f"Error processing page {i+1}: {e}")
+            logger.exception(f"Unexpected error processing page {i+1}: {e}")
             continue
 
     if not page_results:

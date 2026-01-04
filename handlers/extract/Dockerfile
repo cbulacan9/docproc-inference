@@ -27,10 +27,22 @@ ENV PYTHONUNBUFFERED=1
 ENV HF_HOME=/app/hf_cache
 ENV MODEL_NAME=rednote-hilab/dots.ocr
 ENV VLLM_PORT=8000
+ENV MAX_MODEL_LEN=24000
+ENV GPU_MEMORY_UTILIZATION=0.95
 
-# Pre-download model during build (reduces cold start significantly)
-# Uncomment for production builds:
+# =============================================================================
+# Model Pre-download (Optional - for production builds)
+# =============================================================================
+# Uncomment the following line to pre-download the model during image build.
+# This significantly reduces cold start time (~30-60s saved) but increases
+# image size by ~4GB. Recommended for production deployments.
+#
 # RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('rednote-hilab/dots.ocr')"
+#
+# Note: If using a private model or custom HuggingFace token, set HF_TOKEN:
+#   ARG HF_TOKEN
+#   RUN HF_TOKEN=${HF_TOKEN} python -c "..."
+# =============================================================================
 
 # Start vLLM server and handler
 CMD ["./start.sh"]
