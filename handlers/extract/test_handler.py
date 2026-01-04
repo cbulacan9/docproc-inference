@@ -610,6 +610,31 @@ class TestCallVllm:
             with pytest.raises(ValueError, match="vLLM connection error"):
                 await call_vllm("base64imagedata")
 
+    @pytest.mark.asyncio
+    async def test_invalid_prompt_mode_falls_back_to_default(self, sample_vllm_response):
+        """Should fall back to layout_all prompt for invalid prompt_mode."""
+        from handler import call_vllm, PROMPT_MODES
+
+        with patch('handler.httpx.AsyncClient') as mock_client:
+            mock_response = MagicMock()
+            mock_response.json.return_value = sample_vllm_response
+            mock_response.raise_for_status = MagicMock()
+
+            mock_post = AsyncMock(return_value=mock_response)
+            mock_client.return_value.__aenter__.return_value.post = mock_post
+
+            # Call with invalid prompt_mode
+            await call_vllm("base64imagedata", prompt_mode="invalid_mode")
+
+            # Verify API was called with default prompt
+            call_args = mock_post.call_args
+            payload = call_args.kwargs.get('json') or call_args[1].get('json')
+            message_content = payload["messages"][0]["content"]
+            text_content = [c for c in message_content if c.get("type") == "text"][0]["text"]
+
+            # Should use the default "layout_all" prompt
+            assert text_content == PROMPT_MODES["layout_all"]
+
 
 # =============================================================================
 # Multi-page extraction tests
