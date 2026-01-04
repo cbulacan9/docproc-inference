@@ -72,12 +72,21 @@ class TestCreateAuthDependency:
 
     def test_uses_constant_time_comparison(self):
         """Should use secrets.compare_digest for timing-safe comparison."""
-        # This is a design verification - the auth module uses secrets.compare_digest
-        from app.middleware import auth
-        import secrets
+        app = FastAPI()
+        auth_dep = create_auth_dependency("valid-key-123")
 
-        # Verify the module uses compare_digest (implementation detail test)
-        assert hasattr(secrets, 'compare_digest')
+        @app.get("/protected")
+        async def protected_route(api_key: str = Depends(auth_dep)):
+            return {"status": "authenticated"}
+
+        client = TestClient(app)
+
+        # Mock secrets.compare_digest and verify it's called
+        with patch('app.middleware.auth.secrets.compare_digest', return_value=True) as mock_compare:
+            response = client.get("/protected", headers={"X-API-Key": "valid-key-123"})
+
+            assert response.status_code == 200
+            mock_compare.assert_called_once_with("valid-key-123", "valid-key-123")
 
 
 class TestApiKeyHeader:
