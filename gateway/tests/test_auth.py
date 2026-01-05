@@ -104,14 +104,14 @@ class TestApiKeyHeader:
 class TestAuthIntegration:
     """Integration tests for auth with real app."""
 
-    def _create_fresh_app(self, api_key="test-api-key-12345"):
-        """Create a fresh app with clean routers for testing."""
-        import os
+    def _create_fresh_app_with_mock_client(self, api_key="test-api-key-12345"):
+        """Create a fresh app with clean routers and mock RunPod client for testing."""
         from fastapi import Depends, FastAPI
         from app.config import Settings
         from app.middleware.auth import create_auth_dependency
         from app.middleware.logging import RequestLoggingMiddleware
         from app.routes import classify, extract, health
+        from app.services.runpod_client import RunPodResponse
 
         # Create settings directly
         settings = Settings(
@@ -123,6 +123,27 @@ class TestAuthIntegration:
 
         app = FastAPI()
         app.add_middleware(RequestLoggingMiddleware)
+
+        # Create and inject mock RunPod client
+        mock_client = AsyncMock()
+        mock_client.classify = AsyncMock(return_value=RunPodResponse(
+            success=True,
+            data={"type": "W2", "confidence": 0.9, "reasoning": "test"},
+            error=None,
+            latency_ms=1000
+        ))
+        mock_client.extract = AsyncMock(return_value=RunPodResponse(
+            success=True,
+            data={"data": {}, "confidence": {}, "doc_type": "W2", "page_count": 1},
+            error=None,
+            latency_ms=1000
+        ))
+        mock_client.health_check = AsyncMock(return_value={
+            "classify": {"status": "healthy", "workers": {"idle": 1}},
+            "extract": {"status": "healthy", "workers": {"idle": 1}}
+        })
+        mock_client.close = AsyncMock()
+        app.state.runpod_client = mock_client
 
         auth_dep = Depends(create_auth_dependency(settings.api_key))
 
@@ -139,22 +160,13 @@ class TestAuthIntegration:
             dependencies=[auth_dep]
         )
 
-        return app, settings
+        return app, settings, mock_client
 
-    def test_health_routes_no_auth_required(self, test_client):
+    def test_health_routes_no_auth_required(self, test_client, mock_runpod_client):
         """Health routes should not require authentication."""
-        # Mock the RunPod client for /health endpoint
-        with patch('app.routes.health.RunPodClient') as MockClient:
-            mock_instance = AsyncMock()
-            mock_instance.health_check = AsyncMock(return_value={
-                "classify": {"status": "healthy"},
-                "extract": {"status": "healthy"}
-            })
-            mock_instance.close = AsyncMock()
-            MockClient.return_value = mock_instance
-
-            response = test_client.get("/health")
-            assert response.status_code != 401
+        # mock_runpod_client is already configured in test_client fixture
+        response = test_client.get("/health")
+        assert response.status_code != 401
 
         response = test_client.get("/ready")
         assert response.status_code == 200
@@ -164,104 +176,62 @@ class TestAuthIntegration:
 
     def test_classify_requires_auth_missing_key(self, sample_classify_request):
         """POST /v1/classify should return 401 when API key is missing."""
-        app, _ = self._create_fresh_app()
+        app, _, _ = self._create_fresh_app_with_mock_client()
 
-        with patch('app.routes.classify.RunPodClient') as MockClient:
-            mock_instance = AsyncMock()
-            MockClient.return_value = mock_instance
+        with TestClient(app) as client:
+            response = client.post("/v1/classify", json=sample_classify_request)
 
-            with TestClient(app) as client:
-                response = client.post("/v1/classify", json=sample_classify_request)
-
-            assert response.status_code == 401
-            assert "Missing API key" in response.json()["detail"]
+        assert response.status_code == 401
+        assert "Missing API key" in response.json()["detail"]
 
     def test_extract_requires_auth_missing_key(self, sample_extract_request):
         """POST /v1/extract should return 401 when API key is missing."""
-        app, _ = self._create_fresh_app()
+        app, _, _ = self._create_fresh_app_with_mock_client()
 
-        with patch('app.routes.extract.RunPodClient') as MockClient:
-            mock_instance = AsyncMock()
-            MockClient.return_value = mock_instance
+        with TestClient(app) as client:
+            response = client.post("/v1/extract", json=sample_extract_request)
 
-            with TestClient(app) as client:
-                response = client.post("/v1/extract", json=sample_extract_request)
-
-            assert response.status_code == 401
-            assert "Missing API key" in response.json()["detail"]
+        assert response.status_code == 401
+        assert "Missing API key" in response.json()["detail"]
 
     def test_classify_with_valid_auth_passes(self, sample_classify_request):
         """POST /v1/classify should pass auth with valid API key."""
-        from app.services.runpod_client import RunPodResponse
+        app, _, mock_client = self._create_fresh_app_with_mock_client()
 
-        app, _ = self._create_fresh_app()
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/classify",
+                json=sample_classify_request,
+                headers={"X-API-Key": "test-api-key-12345"}
+            )
 
-        mock_response = RunPodResponse(
-            success=True,
-            data={"type": "W2", "confidence": 0.9, "reasoning": "test"},
-            error=None,
-            latency_ms=1000
-        )
-
-        with patch('app.routes.classify.RunPodClient') as MockClient:
-            mock_instance = AsyncMock()
-            mock_instance.classify = AsyncMock(return_value=mock_response)
-            mock_instance.close = AsyncMock()
-            MockClient.return_value = mock_instance
-
-            with TestClient(app) as client:
-                response = client.post(
-                    "/v1/classify",
-                    json=sample_classify_request,
-                    headers={"X-API-Key": "test-api-key-12345"}
-                )
-
-            assert response.status_code == 200
-            MockClient.assert_called_once()
+        assert response.status_code == 200
+        mock_client.classify.assert_called_once()
 
     def test_classify_with_invalid_auth(self, sample_classify_request):
         """POST /v1/classify should return 401 for invalid API key."""
-        app, _ = self._create_fresh_app()
+        app, _, _ = self._create_fresh_app_with_mock_client()
 
-        with patch('app.routes.classify.RunPodClient') as MockClient:
-            mock_instance = AsyncMock()
-            MockClient.return_value = mock_instance
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/classify",
+                json=sample_classify_request,
+                headers={"X-API-Key": "wrong-key-12345"}
+            )
 
-            with TestClient(app) as client:
-                response = client.post(
-                    "/v1/classify",
-                    json=sample_classify_request,
-                    headers={"X-API-Key": "wrong-key-12345"}
-                )
-
-            assert response.status_code == 401
-            assert "Invalid API key" in response.json()["detail"]
+        assert response.status_code == 401
+        assert "Invalid API key" in response.json()["detail"]
 
     def test_extract_with_valid_auth_passes(self, sample_extract_request):
         """POST /v1/extract should pass auth with valid API key."""
-        from app.services.runpod_client import RunPodResponse
+        app, _, mock_client = self._create_fresh_app_with_mock_client()
 
-        app, _ = self._create_fresh_app()
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/extract",
+                json=sample_extract_request,
+                headers={"X-API-Key": "test-api-key-12345"}
+            )
 
-        mock_response = RunPodResponse(
-            success=True,
-            data={"data": {}, "confidence": {}, "doc_type": "W2", "page_count": 1},
-            error=None,
-            latency_ms=1000
-        )
-
-        with patch('app.routes.extract.RunPodClient') as MockClient:
-            mock_instance = AsyncMock()
-            mock_instance.extract = AsyncMock(return_value=mock_response)
-            mock_instance.close = AsyncMock()
-            MockClient.return_value = mock_instance
-
-            with TestClient(app) as client:
-                response = client.post(
-                    "/v1/extract",
-                    json=sample_extract_request,
-                    headers={"X-API-Key": "test-api-key-12345"}
-                )
-
-            assert response.status_code == 200
-            MockClient.assert_called_once()
+        assert response.status_code == 200
+        mock_client.extract.assert_called_once()

@@ -2,9 +2,13 @@
 
 import os
 import pytest
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from app.services.runpod_client import RunPodResponse
 
 
 # =============================================================================
@@ -33,12 +37,49 @@ def test_settings(mock_env_vars):
 
 
 # =============================================================================
+# Mock RunPod Client fixture
+# =============================================================================
+
+@pytest.fixture
+def mock_runpod_client():
+    """
+    Create a mock RunPodClient for injection into app.state.
+
+    Tests can configure return values via the mock's methods:
+        mock_runpod_client.classify.return_value = RunPodResponse(...)
+        mock_runpod_client.extract.return_value = RunPodResponse(...)
+        mock_runpod_client.health_check.return_value = {...}
+    """
+    mock = AsyncMock()
+    mock.classify = AsyncMock(return_value=RunPodResponse(
+        success=True,
+        data={"type": "W2", "confidence": 0.95, "reasoning": "Default mock response"},
+        error=None,
+        latency_ms=1000,
+        job_id="mock-job-123"
+    ))
+    mock.extract = AsyncMock(return_value=RunPodResponse(
+        success=True,
+        data={"data": {}, "confidence": {}, "doc_type": "W2", "page_count": 1},
+        error=None,
+        latency_ms=1000,
+        job_id="mock-job-456"
+    ))
+    mock.health_check = AsyncMock(return_value={
+        "classify": {"status": "healthy", "workers": {"idle": 1}},
+        "extract": {"status": "healthy", "workers": {"idle": 1}}
+    })
+    mock.close = AsyncMock()
+    return mock
+
+
+# =============================================================================
 # Client fixtures
 # =============================================================================
 
 @pytest.fixture
-def test_client(mock_env_vars):
-    """Create FastAPI test client with mocked settings."""
+def test_client(mock_env_vars, mock_runpod_client):
+    """Create FastAPI test client with mocked RunPod client."""
     from app.config import get_settings
     get_settings.cache_clear()
 
@@ -48,11 +89,13 @@ def test_client(mock_env_vars):
     classify.router.dependencies = []
     extract.router.dependencies = []
 
-    from app.main import create_app
-    app = create_app()
+    # Patch RunPodClient to return our mock instead of creating a real client
+    with patch('app.main.RunPodClient', return_value=mock_runpod_client):
+        from app.main import create_app
+        app = create_app()
 
-    with TestClient(app) as client:
-        yield client
+        with TestClient(app) as client:
+            yield client
 
 
 @pytest.fixture

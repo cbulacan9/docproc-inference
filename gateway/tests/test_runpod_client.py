@@ -426,3 +426,264 @@ class TestRunPodResponse:
         )
 
         assert response.job_id is None
+
+
+class TestRunPodClientClose:
+    """Tests for close method."""
+
+    @pytest.mark.asyncio
+    async def test_close_calls_aclose_on_http_client(self):
+        """Should call aclose on the underlying HTTP client."""
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_client = AsyncMock()
+            mock_client.aclose = AsyncMock()
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id"
+            )
+            client._client = mock_client
+
+            await client.close()
+
+            mock_client.aclose.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_close_can_be_called_multiple_times(self):
+        """Should handle multiple close calls gracefully."""
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_client = AsyncMock()
+            mock_client.aclose = AsyncMock()
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id"
+            )
+            client._client = mock_client
+
+            # Should not raise on multiple calls
+            await client.close()
+            await client.close()
+
+            assert mock_client.aclose.call_count == 2
+
+
+class TestRunPodClientHttpErrors:
+    """Tests for HTTP error handling."""
+
+    @pytest.mark.asyncio
+    async def test_bad_request_400_returns_error(self):
+        """Should return error on HTTP 400 bad request."""
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_response = MagicMock()
+            mock_response.status_code = 400
+            mock_response.json.return_value = {"error": "Invalid image URL format"}
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id",
+                max_retries=3
+            )
+            client._client = mock_client
+
+            result = await client.classify(["invalid-url"])
+
+            assert result.success is False
+            assert "Bad request" in result.error
+            assert "Invalid image URL format" in result.error
+            # Should not retry on 400
+            assert mock_client.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_bad_request_400_with_unknown_error(self):
+        """Should handle 400 response with no error message."""
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_response = MagicMock()
+            mock_response.status_code = 400
+            mock_response.json.return_value = {}  # No error field
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id"
+            )
+            client._client = mock_client
+
+            result = await client.classify(["https://example.com/doc.png"])
+
+            assert result.success is False
+            assert "Bad request" in result.error
+            assert "Unknown" in result.error
+
+
+class TestRunPodClientJobStatus:
+    """Tests for job status handling (IN_QUEUE, IN_PROGRESS)."""
+
+    @pytest.mark.asyncio
+    async def test_in_queue_status_triggers_retry(self):
+        """Should retry when job is IN_QUEUE (timeout scenario)."""
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "id": "job-123",
+                "status": "IN_QUEUE"
+            }
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id",
+                max_retries=2
+            )
+            client._client = mock_client
+
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                result = await client.classify(["https://example.com/doc.png"])
+
+            assert result.success is False
+            assert "Max retries exceeded" in result.error
+            assert "IN_QUEUE" in result.error
+            assert mock_client.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_in_progress_status_triggers_retry(self):
+        """Should retry when job is IN_PROGRESS (timeout scenario)."""
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "id": "job-456",
+                "status": "IN_PROGRESS"
+            }
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id",
+                max_retries=2
+            )
+            client._client = mock_client
+
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                result = await client.classify(["https://example.com/doc.png"])
+
+            assert result.success is False
+            assert "Max retries exceeded" in result.error
+            assert "IN_PROGRESS" in result.error
+            assert mock_client.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_in_queue_then_completed(self):
+        """Should succeed if job completes after being in queue."""
+        with patch('httpx.AsyncClient') as MockClient:
+            in_queue_response = MagicMock()
+            in_queue_response.status_code = 200
+            in_queue_response.json.return_value = {
+                "id": "job-123",
+                "status": "IN_QUEUE"
+            }
+
+            completed_response = MagicMock()
+            completed_response.status_code = 200
+            completed_response.json.return_value = {
+                "id": "job-123",
+                "status": "COMPLETED",
+                "output": {"type": "W2", "confidence": 0.95},
+                "executionTime": 2000
+            }
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=[in_queue_response, completed_response])
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id",
+                max_retries=3
+            )
+            client._client = mock_client
+
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                result = await client.classify(["https://example.com/doc.png"])
+
+            assert result.success is True
+            assert result.data["type"] == "W2"
+            assert mock_client.post.call_count == 2
+
+
+class TestRunPodClientRequestError:
+    """Tests for request error handling."""
+
+    @pytest.mark.asyncio
+    async def test_request_error_triggers_retry(self):
+        """Should retry on generic request errors."""
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=httpx.RequestError("Network error"))
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id",
+                max_retries=2
+            )
+            client._client = mock_client
+
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                result = await client.classify(["https://example.com/doc.png"])
+
+            assert result.success is False
+            assert "Max retries exceeded" in result.error
+            assert mock_client.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_429_triggers_retry(self):
+        """Should retry on HTTP 429 rate limit."""
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+            mock_response.json.return_value = {"error": "Rate limit exceeded"}
+
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            MockClient.return_value = mock_client
+
+            client = RunPodClient(
+                api_key="test-key",
+                classify_endpoint="classify-id",
+                extract_endpoint="extract-id",
+                max_retries=2
+            )
+            client._client = mock_client
+
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                result = await client.classify(["https://example.com/doc.png"])
+
+            assert result.success is False
+            assert "Max retries exceeded" in result.error
+            assert "429" in result.error
+            assert mock_client.post.call_count == 2
