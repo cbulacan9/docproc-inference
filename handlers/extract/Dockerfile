@@ -12,11 +12,12 @@ RUN pip install --no-cache-dir \
     runpod>=1.6.0 \
     requests>=2.31.0 \
     pillow>=10.0.0 \
-    httpx>=0.26.0
+    httpx>=0.26.0 \
+    nest_asyncio>=1.5.0
 
 # Copy handler code
 COPY handler.py .
-COPY transformers.py .
+COPY doc_transformers.py .
 COPY start.sh .
 
 # Make startup script executable
@@ -26,7 +27,7 @@ RUN chmod +x start.sh
 ENV PYTHONUNBUFFERED=1
 ENV HF_HOME=/app/hf_cache
 ENV MODEL_NAME=rednote-hilab/dots.ocr
-ENV VLLM_PORT=8000
+ENV VLLM_PORT=8080
 ENV MAX_MODEL_LEN=24000
 ENV GPU_MEMORY_UTILIZATION=0.95
 
@@ -44,5 +45,6 @@ ENV GPU_MEMORY_UTILIZATION=0.95
 #   RUN HF_TOKEN=${HF_TOKEN} python -c "..."
 # =============================================================================
 
-# Start vLLM server and handler
-CMD ["./start.sh"]
+# Override base image entrypoint and start our script
+ENTRYPOINT []
+CMD ["/bin/bash", "./start.sh"]

@@ -1,49 +1,59 @@
 #!/bin/bash
-# handlers/extract/start.sh
-#
-# Starts vLLM server in background, waits for it to be ready,
-# then starts the RunPod handler.
+# Starts vLLM server in background, waits for it to be ready, then starts the RunPod handler.
 
 set -e
 
 echo "Starting dots.ocr extraction handler..."
+echo "VLLM_PORT=${VLLM_PORT:-8080}"
+echo "MODEL_NAME=${MODEL_NAME:-rednote-hilab/dots.ocr}"
 
 # Start vLLM server in background
-echo "Launching vLLM server with dots.ocr..."
-vllm serve ${MODEL_NAME:-rednote-hilab/dots.ocr} \
-    --host 0.0.0.0 \
-    --port ${VLLM_PORT:-8000} \
-    --trust-remote-code \
-    --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.95} \
-    --max-model-len ${MAX_MODEL_LEN:-24000} \
-    --dtype float16 \
-    &
+echo "Launching vLLM server..."
+vllm serve "${MODEL_NAME:-rednote-hilab/dots.ocr}" --host 0.0.0.0 --port "${VLLM_PORT:-8080}" --trust-remote-code --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.95}" --max-model-len "${MAX_MODEL_LEN:-24000}" --dtype float16 &
 
 VLLM_PID=$!
+echo "vLLM started with PID: $VLLM_PID"
 
 # Wait for vLLM to be ready
 echo "Waiting for vLLM server to be ready..."
-MAX_RETRIES=60
-RETRY_COUNT=0
+python3 -c "
+import time
+import httpx
+import os
 
-while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if curl -s http://localhost:${VLLM_PORT:-8000}/health > /dev/null 2>&1; then
-        echo "vLLM server is ready!"
-        break
-    fi
-    RETRY_COUNT=$((RETRY_COUNT + 1))
-    echo "Waiting for vLLM... (attempt $RETRY_COUNT/$MAX_RETRIES)"
-    sleep 2
-done
+max_retries = 90
+port = os.environ.get('VLLM_PORT', '8080')
 
-if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-    echo "ERROR: vLLM server failed to start"
+for i in range(max_retries):
+    try:
+        r = httpx.get(f'http://localhost:{port}/health', timeout=5)
+        if r.status_code == 200:
+            print('vLLM server is ready!')
+            exit(0)
+    except Exception as e:
+        pass
+    print(f'Waiting for vLLM... (attempt {i+1}/{max_retries})')
+    time.sleep(2)
+
+print('ERROR: vLLM server failed to start after 3 minutes')
+exit(1)
+"
+
+if [ $? -ne 0 ]; then
+    echo "Health check script failed"
     exit 1
 fi
 
+# Debug: Show port status
+echo "=== Port status ==="
+netstat -tlnp 2>/dev/null || ss -tlnp 2>/dev/null || echo "netstat/ss not available"
+echo "==================="
+
 # Start RunPod handler
 echo "Starting RunPod handler..."
-python -u handler.py
+echo "Handler PID will be: $$"
+python3 -u handler.py
 
 # If handler exits, kill vLLM
+echo "Handler exited, cleaning up..."
 kill $VLLM_PID 2>/dev/null || true
