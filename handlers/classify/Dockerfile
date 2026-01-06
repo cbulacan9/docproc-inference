@@ -1,6 +1,6 @@
 # handlers/classify/Dockerfile
 
-FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
@@ -8,14 +8,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install transformers from git (latest with Qwen2.5-VL fixes)
+RUN pip install --no-cache-dir git+https://github.com/huggingface/transformers
+
+# Clear any cached model files to force fresh download
+RUN rm -rf /root/.cache/huggingface /app/hf_cache
+
 # Copy handler code
 COPY handler.py .
-
-# Pre-download model during build (optional but reduces cold start)
-# Uncomment for production builds:
-# RUN python -c "from transformers import Qwen2VLForConditionalGeneration, AutoProcessor; \
-#     Qwen2VLForConditionalGeneration.from_pretrained('Qwen/Qwen2.5-VL-7B-Instruct', trust_remote_code=True); \
-#     AutoProcessor.from_pretrained('Qwen/Qwen2.5-VL-7B-Instruct', trust_remote_code=True)"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

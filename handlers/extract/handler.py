@@ -23,12 +23,15 @@ import time
 from io import BytesIO
 from typing import Any
 
+import nest_asyncio
+nest_asyncio.apply()  # Allow nested asyncio.run() calls
+
 import httpx
 import requests
 import runpod
 from PIL import Image
 
-from transformers import transform_to_document_schema
+from doc_transformers import transform_to_document_schema
 
 # Configure logging
 logging.basicConfig(
@@ -38,7 +41,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # vLLM server configuration
-VLLM_PORT = os.environ.get('VLLM_PORT', '8000')
+VLLM_PORT = os.environ.get('VLLM_PORT', '8080')
 VLLM_BASE_URL = f"http://localhost:{VLLM_PORT}/v1"
 MODEL_NAME = os.environ.get('MODEL_NAME', 'rednote-hilab/dots.ocr')
 
@@ -385,7 +388,7 @@ def handler(job: dict) -> dict:
         if not image_urls:
             return {"error": "No image_urls provided"}
 
-        # Run async extraction
+        # Run async extraction (nest_asyncio allows nested asyncio.run)
         result = asyncio.run(extract(image_urls, doc_type, prompt_mode))
 
         # Add metadata

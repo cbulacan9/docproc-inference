@@ -41,12 +41,12 @@ def load_model():
     logger.info("Loading Qwen2.5-VL-7B-Instruct...")
     start = time.time()
 
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
     import torch
 
     model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-    MODEL = Qwen2VLForConditionalGeneration.from_pretrained(
+    MODEL = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_name,
         torch_dtype=torch.float16,
         device_map="auto",
