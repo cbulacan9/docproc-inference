@@ -21,12 +21,11 @@ from handler import (
     fetch_image,
     image_to_base64,
     parse_dots_ocr_output,
-    estimate_confidence_from_elements,
     handler,
 )
 
 # Import transformer functions
-from transformers import (
+from doc_transformers import (
     extract_amounts,
     extract_dates,
     extract_ssn,
@@ -96,37 +95,6 @@ class TestParseDotsOcrOutput:
         })
         result = parse_dots_ocr_output(raw)
         assert "layout_elements" in result
-
-
-class TestEstimateConfidenceFromElements:
-    """Tests for estimate_confidence_from_elements function."""
-
-    def test_returns_average_confidence(self):
-        """Should return average of element confidences."""
-        elements = [
-            {"confidence": 0.9},
-            {"confidence": 0.8},
-            {"confidence": 1.0}
-        ]
-        result = estimate_confidence_from_elements(elements)
-        assert abs(result - 0.9) < 0.01
-
-    def test_handles_empty_list(self):
-        """Should return 0.5 for empty list."""
-        result = estimate_confidence_from_elements([])
-        assert result == 0.5
-
-    def test_handles_missing_confidence(self):
-        """Should use 0.85 default for missing confidence."""
-        elements = [{"text": "no confidence"}]
-        result = estimate_confidence_from_elements(elements)
-        assert result == 0.85
-
-    def test_handles_non_dict_elements(self):
-        """Should skip non-dict elements."""
-        elements = [{"confidence": 0.9}, "string", None, {"confidence": 0.8}]
-        result = estimate_confidence_from_elements(elements)
-        assert abs(result - 0.85) < 0.01
 
 
 class TestExtractAmounts:
@@ -251,25 +219,32 @@ class TestTransformBankStatement:
 
     def test_extracts_bank_name(self, sample_layout_elements, sample_bank_statement_text):
         """Should extract bank name."""
-        result = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
-        assert result["header"]["bank_name"] == "Chase"
+        data, field_confidences = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
+        assert data["header"]["bank_name"] == "Chase"
 
     def test_extracts_account_number(self, sample_layout_elements, sample_bank_statement_text):
         """Should extract masked account number."""
-        result = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
-        assert "1234" in result["header"]["account_number"]
+        data, field_confidences = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
+        assert "1234" in data["header"]["account_number"]
 
     def test_extracts_statement_period(self, sample_layout_elements, sample_bank_statement_text):
         """Should extract statement period."""
-        result = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
-        assert result["header"]["statement_period"] is not None
+        data, field_confidences = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
+        assert data["header"]["statement_period"] is not None
 
     def test_has_expected_structure(self, sample_layout_elements, sample_bank_statement_text):
         """Should return expected schema structure."""
-        result = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
-        assert "header" in result
-        assert "transactions" in result
-        assert "summary" in result
+        data, field_confidences = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
+        assert "header" in data
+        assert "transactions" in data
+        assert "summary" in data
+
+    def test_returns_field_confidences(self, sample_layout_elements, sample_bank_statement_text):
+        """Should return field confidences dict."""
+        data, field_confidences = transform_bank_statement(sample_layout_elements, sample_bank_statement_text)
+        assert isinstance(field_confidences, dict)
+        assert "header.bank_name" in field_confidences
+        assert "header.account_number" in field_confidences
 
 
 class TestTransformW2:
@@ -277,31 +252,38 @@ class TestTransformW2:
 
     def test_extracts_ssn(self, sample_layout_elements, sample_w2_text):
         """Should extract employee SSN."""
-        result = transform_w2(sample_layout_elements, sample_w2_text)
-        assert result["employee"]["ssn"] == "XXX-XX-1234"
+        data, field_confidences = transform_w2(sample_layout_elements, sample_w2_text)
+        assert data["employee"]["ssn"] == "XXX-XX-1234"
 
     def test_extracts_ein(self, sample_layout_elements, sample_w2_text):
         """Should extract employer EIN."""
-        result = transform_w2(sample_layout_elements, sample_w2_text)
-        assert result["employer"]["ein"] == "12-3456789"
+        data, field_confidences = transform_w2(sample_layout_elements, sample_w2_text)
+        assert data["employer"]["ein"] == "12-3456789"
 
     def test_extracts_tax_year(self, sample_layout_elements, sample_w2_text):
         """Should extract tax year."""
-        result = transform_w2(sample_layout_elements, sample_w2_text)
-        assert result["tax_year"] == "2023"
+        data, field_confidences = transform_w2(sample_layout_elements, sample_w2_text)
+        assert data["tax_year"] == "2023"
 
     def test_extracts_wages(self, sample_layout_elements, sample_w2_text):
         """Should extract wage box values."""
-        result = transform_w2(sample_layout_elements, sample_w2_text)
-        assert result["wages"]["box1_wages"] == 75000.00
+        data, field_confidences = transform_w2(sample_layout_elements, sample_w2_text)
+        assert data["boxes"]["box1_wages"] == 75000.00
 
     def test_has_expected_structure(self, sample_layout_elements, sample_w2_text):
         """Should return expected schema structure."""
-        result = transform_w2(sample_layout_elements, sample_w2_text)
-        assert "employee" in result
-        assert "employer" in result
-        assert "wages" in result
-        assert "tax_year" in result
+        data, field_confidences = transform_w2(sample_layout_elements, sample_w2_text)
+        assert "employee" in data
+        assert "employer" in data
+        assert "boxes" in data
+        assert "tax_year" in data
+
+    def test_returns_field_confidences(self, sample_layout_elements, sample_w2_text):
+        """Should return field confidences dict."""
+        data, field_confidences = transform_w2(sample_layout_elements, sample_w2_text)
+        assert isinstance(field_confidences, dict)
+        assert "employee.ssn" in field_confidences
+        assert "employer.ein" in field_confidences
 
 
 class TestTransform1099:
@@ -310,15 +292,21 @@ class TestTransform1099:
     def test_detects_form_type(self):
         """Should detect 1099 form type."""
         text = "Form 1099-INT Interest Income 2023"
-        result = transform_1099([], text)
-        assert result["form_type"] == "1099-INT"
+        data, field_confidences = transform_1099([], text)
+        assert data["form_type"] == "1099-INT"
 
     def test_has_expected_structure(self):
         """Should return expected schema structure."""
-        result = transform_1099([], "1099-DIV 2023")
-        assert "recipient" in result
-        assert "payer" in result
-        assert "amounts" in result
+        data, field_confidences = transform_1099([], "1099-DIV 2023")
+        assert "recipient" in data
+        assert "payer" in data
+        assert "boxes" in data
+
+    def test_returns_field_confidences(self):
+        """Should return field confidences dict."""
+        data, field_confidences = transform_1099([], "1099-INT 2023 $1,234.56")
+        assert isinstance(field_confidences, dict)
+        assert "form_type" in field_confidences
 
 
 class TestTransformGeneric:
@@ -327,22 +315,27 @@ class TestTransformGeneric:
     def test_extracts_amounts(self):
         """Should extract all amounts."""
         text = "Total: $500.00, Tax: $50.00"
-        result = transform_generic([], text)
-        assert len(result["amounts"]) >= 2
+        data, field_confidences = transform_generic([], text)
+        assert len(data["amounts"]) >= 2
 
     def test_extracts_dates(self):
         """Should extract all dates."""
         text = "Date: 01/15/2024"
-        result = transform_generic([], text)
-        assert len(result["dates"]) >= 1
+        data, field_confidences = transform_generic([], text)
+        assert len(data["dates"]) >= 1
 
     def test_has_expected_structure(self):
         """Should return expected schema structure."""
-        result = transform_generic([], "Some text")
-        assert "amounts" in result
-        assert "dates" in result
-        assert "text_blocks" in result
-        assert "tables" in result
+        data, field_confidences = transform_generic([], "Some text")
+        assert "amounts" in data
+        assert "dates" in data
+        assert "text_blocks" in data
+        assert "tables" in data
+
+    def test_returns_field_confidences(self):
+        """Should return field confidences dict."""
+        data, field_confidences = transform_generic([], "Some text $100.00")
+        assert isinstance(field_confidences, dict)
 
 
 class TestTransformToDocumentSchema:
@@ -350,31 +343,41 @@ class TestTransformToDocumentSchema:
 
     def test_routes_bank_statement(self, sample_layout_elements, sample_bank_statement_text):
         """Should route to bank_statement transformer."""
-        result = transform_to_document_schema(
+        data, confidence = transform_to_document_schema(
             "bank_statement", sample_layout_elements, sample_bank_statement_text
         )
-        assert "header" in result
-        assert "transactions" in result
+        assert "header" in data
+        assert "transactions" in data
 
     def test_routes_w2(self, sample_layout_elements, sample_w2_text):
         """Should route to W2 transformer."""
-        result = transform_to_document_schema(
+        data, confidence = transform_to_document_schema(
             "W2", sample_layout_elements, sample_w2_text
         )
-        assert "employee" in result
-        assert "wages" in result
+        assert "employee" in data
+        assert "boxes" in data
 
     def test_routes_1099_types(self):
         """Should route all 1099 types to 1099 transformer."""
         for form_type in ["1099-INT", "1099-DIV", "1099-MISC", "1099-NEC", "1099-R"]:
-            result = transform_to_document_schema(form_type, [], "text")
-            assert "recipient" in result
+            data, confidence = transform_to_document_schema(form_type, [], "text")
+            assert "recipient" in data
 
     def test_falls_back_to_generic(self):
         """Should use generic transformer for unknown types."""
-        result = transform_to_document_schema("unknown_type", [], "text")
-        assert "amounts" in result
-        assert "text_blocks" in result
+        data, confidence = transform_to_document_schema("unknown_type", [], "text")
+        assert "amounts" in data
+        assert "text_blocks" in data
+
+    def test_returns_confidence_structure(self, sample_layout_elements, sample_bank_statement_text):
+        """Should return confidence dict with overall and fields."""
+        data, confidence = transform_to_document_schema(
+            "bank_statement", sample_layout_elements, sample_bank_statement_text
+        )
+        assert "overall" in confidence
+        assert "fields" in confidence
+        assert isinstance(confidence["overall"], float)
+        assert isinstance(confidence["fields"], dict)
 
 
 class TestFetchImage:
@@ -851,36 +854,36 @@ class TestBankStatementVariations:
     def test_extracts_bank_of_america(self):
         """Should extract Bank of America name."""
         text = "Bank of America\nChecking Account Statement"
-        result = transform_bank_statement([], text)
-        assert result["header"]["bank_name"] == "Bank of America"
+        data, field_confidences = transform_bank_statement([], text)
+        assert data["header"]["bank_name"] == "Bank of America"
 
     def test_extracts_wells_fargo(self):
         """Should extract Wells Fargo name."""
         text = "Wells Fargo\nAccount Summary"
-        result = transform_bank_statement([], text)
-        assert result["header"]["bank_name"] == "Wells Fargo"
+        data, field_confidences = transform_bank_statement([], text)
+        assert data["header"]["bank_name"] == "Wells Fargo"
 
     def test_extracts_credit_union(self):
         """Should extract Credit Union names."""
         text = "Navy Federal Credit Union\nStatement"
-        result = transform_bank_statement([], text)
-        assert "Credit Union" in result["header"]["bank_name"]
+        data, field_confidences = transform_bank_statement([], text)
+        assert "Credit Union" in data["header"]["bank_name"]
 
     def test_handles_opening_balance_instead_of_beginning(self):
         """Should recognize 'Opening Balance' as beginning balance."""
         elements = [
             {"text": "Opening Balance: $1,000.00", "confidence": 0.95}
         ]
-        result = transform_bank_statement(elements, "Opening Balance: $1,000.00")
-        assert result["header"]["beginning_balance"] == 1000.00
+        data, field_confidences = transform_bank_statement(elements, "Opening Balance: $1,000.00")
+        assert data["header"]["beginning_balance"] == 1000.00
 
     def test_handles_closing_balance_instead_of_ending(self):
         """Should recognize 'Closing Balance' as ending balance."""
         elements = [
             {"text": "Closing Balance: $2,500.00", "confidence": 0.95}
         ]
-        result = transform_bank_statement(elements, "Closing Balance: $2,500.00")
-        assert result["header"]["ending_balance"] == 2500.00
+        data, field_confidences = transform_bank_statement(elements, "Closing Balance: $2,500.00")
+        assert data["header"]["ending_balance"] == 2500.00
 
     def test_extracts_transactions_with_negative_amounts(self):
         """Should extract transactions with negative amounts."""
@@ -889,16 +892,16 @@ class TestBankStatementVariations:
         01/15 ATM Withdrawal -$200.00
         01/16 Direct Deposit $1,500.00
         """
-        result = transform_bank_statement([], text)
+        data, field_confidences = transform_bank_statement([], text)
         # Check transactions were found
-        amounts = [t["amount"] for t in result["transactions"]]
+        amounts = [t["amount"] for t in data["transactions"]]
         assert -200.00 in amounts or 200.00 in amounts
 
     def test_handles_account_number_with_asterisks(self):
         """Should handle account numbers masked with asterisks."""
         text = "Account: **1234"
-        result = transform_bank_statement([], text)
-        assert "1234" in result["header"]["account_number"]
+        data, field_confidences = transform_bank_statement([], text)
+        assert "1234" in data["header"]["account_number"]
 
 
 # =============================================================================
@@ -911,34 +914,34 @@ class TestW2EdgeCases:
     def test_handles_missing_all_boxes(self):
         """Should handle W2 with no recognizable box values."""
         text = "W-2 2023\nEmployee Name: John Doe"
-        result = transform_w2([], text)
+        data, field_confidences = transform_w2([], text)
         # Should still have structure
-        assert "wages" in result
-        assert result["tax_year"] == "2023"
+        assert "boxes" in data
+        assert data["tax_year"] == "2023"
 
     def test_handles_partial_boxes(self):
         """Should handle W2 with only some boxes filled."""
         text = """
         W-2 2023
         Box 1 Wages: $50,000.00
-        Box 2 Federal tax: $8,000.00
+        Box 2 Federal income tax withheld: $8,000.00
         """
-        result = transform_w2([], text)
-        assert result["wages"]["box1_wages"] == 50000.00
-        assert result["wages"]["box2_federal_tax"] == 8000.00
-        assert result["wages"]["box3_ss_wages"] is None
+        data, field_confidences = transform_w2([], text)
+        assert data["boxes"]["box1_wages"] == 50000.00
+        assert data["boxes"]["box2_federal_withheld"] == 8000.00
+        assert data["boxes"]["box3_ss_wages"] is None
 
     def test_extracts_year_without_w2_label(self):
         """Should extract year even without W-2 prefix."""
         text = "Tax Statement 2022\nWages: $60,000"
-        result = transform_w2([], text)
-        assert result["tax_year"] == "2022"
+        data, field_confidences = transform_w2([], text)
+        assert data["tax_year"] == "2022"
 
     def test_handles_ssn_with_star_mask(self):
         """Should handle SSN masked with stars."""
         text = "SSN: ***-**-5678"
-        result = transform_w2([], text)
-        assert result["employee"]["ssn"] == "XXX-XX-5678"
+        data, field_confidences = transform_w2([], text)
+        assert data["employee"]["ssn"] == "XXX-XX-5678"
 
     def test_extracts_wages_without_box_label(self):
         """Should extract wages when labeled differently."""
@@ -947,8 +950,8 @@ class TestW2EdgeCases:
         Wages, tips, other compensation: $45,000.00
         Federal income tax withheld: $7,000.00
         """
-        result = transform_w2([], text)
-        assert result["wages"]["box1_wages"] == 45000.00
+        data, field_confidences = transform_w2([], text)
+        assert data["boxes"]["box1_wages"] == 45000.00
 
 
 # =============================================================================
@@ -969,8 +972,8 @@ class TestForm1099Variants:
     ])
     def test_detects_all_1099_variants(self, form_type, text):
         """Should detect all 1099 form variants."""
-        result = transform_1099([], text)
-        assert result["form_type"] == form_type
+        data, field_confidences = transform_1099([], text)
+        assert data["form_type"] == form_type
 
     def test_extracts_interest_amounts_for_1099_int(self):
         """Should extract interest amounts from 1099-INT."""
@@ -979,9 +982,9 @@ class TestForm1099Variants:
         Interest Income: $1,234.56
         Tax Year: 2023
         """
-        result = transform_1099([], text)
-        assert result["form_type"] == "1099-INT"
-        assert 1234.56 in result["amounts"].values()
+        data, field_confidences = transform_1099([], text)
+        assert data["form_type"] == "1099-INT"
+        assert 1234.56 in data["boxes"].values()
 
     def test_extracts_dividend_amounts_for_1099_div(self):
         """Should extract dividend amounts from 1099-DIV."""
@@ -990,9 +993,9 @@ class TestForm1099Variants:
         Total Ordinary Dividends: $5,000.00
         Qualified Dividends: $3,500.00
         """
-        result = transform_1099([], text)
-        assert result["form_type"] == "1099-DIV"
-        amounts_values = list(result["amounts"].values())
+        data, field_confidences = transform_1099([], text)
+        assert data["form_type"] == "1099-DIV"
+        amounts_values = list(data["boxes"].values())
         assert 5000.00 in amounts_values or 3500.00 in amounts_values
 
     def test_extracts_nec_compensation(self):
@@ -1001,16 +1004,16 @@ class TestForm1099Variants:
         1099-NEC 2023
         Nonemployee Compensation: $25,000.00
         """
-        result = transform_1099([], text)
-        assert result["form_type"] == "1099-NEC"
-        assert 25000.00 in result["amounts"].values()
+        data, field_confidences = transform_1099([], text)
+        assert data["form_type"] == "1099-NEC"
+        assert 25000.00 in data["boxes"].values()
 
     def test_handles_1099_without_hyphen(self):
         """Should detect 1099 forms written without hyphen."""
         text = "1099INT Interest Income 2023"
-        result = transform_1099([], text)
+        data, field_confidences = transform_1099([], text)
         # Current regex requires hyphen, but should still return structure
-        assert "recipient" in result
+        assert "recipient" in data
 
 
 # =============================================================================
@@ -1050,12 +1053,12 @@ class TestTransformerEdgeCases:
             {"category": "Table", "text": "Row1\tRow2", "bbox": [0, 0, 100, 100]},
             {"category": "Text", "text": "Regular text", "confidence": 0.9}
         ]
-        result = transform_generic(elements, "")
-        assert len(result["tables"]) == 1
-        assert len(result["text_blocks"]) == 1
+        data, field_confidences = transform_generic(elements, "")
+        assert len(data["tables"]) == 1
+        assert len(data["text_blocks"]) == 1
 
     def test_transform_generic_handles_empty_elements(self):
         """Should handle empty elements list gracefully."""
-        result = transform_generic([], "Just some text")
-        assert result["text_blocks"] == []
-        assert result["tables"] == []
+        data, field_confidences = transform_generic([], "Just some text")
+        assert data["text_blocks"] == []
+        assert data["tables"] == []
