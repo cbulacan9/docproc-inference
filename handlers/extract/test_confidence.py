@@ -87,7 +87,7 @@ class TestGetCriticalFields:
         """Should return correct critical fields for 1099-INT."""
         result = get_critical_fields("1099-INT")
         assert "recipient.tin" in result
-        assert "boxes.box1_interest" in result
+        assert "boxes.box1" in result
 
     def test_returns_invoice_critical_fields(self):
         """Should return correct critical fields for invoice."""
@@ -323,17 +323,16 @@ class TestApplyPositionBoost:
         assert result == 0.85
 
     def test_handles_zero_page_dimensions(self):
-        """Should handle zero page dimensions gracefully.
+        """Should return base confidence when page dimensions are zero.
 
-        Note: When page dimensions are (0, 0), normalized coordinates become 0,
-        which may fall within expected regions. This is current behavior.
+        Zero dimensions indicate invalid page data, so no position boost
+        should be applied.
         """
         result = apply_position_boost(
             "header.bank_name", [100, 50, 400, 80], (0, 0), "bank_statement", 0.85
         )
-        # With zero dimensions, normalized coords are 0, which is within y_max=0.15
-        # so boost is applied (edge case behavior)
-        assert result == 0.90
+        # Zero dimensions guard prevents false positive boosts
+        assert result == 0.85
 
     def test_caps_at_one(self):
         """Should cap boosted confidence at 1.0."""
