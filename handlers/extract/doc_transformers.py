@@ -16,6 +16,7 @@ from typing import Any
 from confidence import (
     apply_cross_reference_boost,
     apply_format_boost,
+    apply_position_boost,
     calculate_overall_confidence,
     get_base_confidence,
     get_critical_fields,
@@ -136,9 +137,19 @@ def _get_element_confidence(
     return default
 
 
+def _find_element_with_text(elements: list, search_text: str) -> dict | None:
+    """Find the element containing the given text."""
+    search_lower = search_text.lower()
+    for el in elements:
+        if search_lower in el.get("text", "").lower():
+            return el
+    return None
+
+
 def transform_bank_statement(
     elements: list,
-    raw_text: str
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
 ) -> tuple[dict, dict[str, Any]]:
     """
     Transform dots.ocr output to bank statement schema.
@@ -146,6 +157,7 @@ def transform_bank_statement(
     Args:
         elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) for position boost
 
     Returns:
         Tuple of (structured_data, field_confidences)
@@ -178,10 +190,18 @@ def transform_bank_statement(
         match = re.search(pattern, raw_text, re.IGNORECASE)
         if match:
             result["header"]["bank_name"] = match.group(1)
+            matching_element = _find_element_with_text(elements, match.group(1))
             base_conf = _get_element_confidence(elements, match.group(1))
-            confidences["header.bank_name"] = apply_format_boost(
-                match.group(1), "header.bank_name", base_conf
-            )
+            base_conf = apply_format_boost(match.group(1), "header.bank_name", base_conf)
+            if matching_element and page_dims:
+                base_conf = apply_position_boost(
+                    "header.bank_name",
+                    matching_element.get("bbox"),
+                    page_dims,
+                    "bank_statement",
+                    base_conf
+                )
+            confidences["header.bank_name"] = base_conf
             break
 
     if result["header"]["bank_name"] is None:
@@ -195,15 +215,24 @@ def transform_bank_statement(
     )
     if acct_match:
         result["header"]["account_number"] = f"****{acct_match.group(1)[-4:]}"
+        matching_element = _find_element_with_text(elements, acct_match.group(0))
         base_conf = _get_element_confidence(elements, acct_match.group(0))
-        confidences["header.account_number"] = apply_format_boost(
+        base_conf = apply_format_boost(
             result["header"]["account_number"], "header.account_number", base_conf
         )
+        if matching_element and page_dims:
+            base_conf = apply_position_boost(
+                "header.account_number",
+                matching_element.get("bbox"),
+                page_dims,
+                "bank_statement",
+                base_conf
+            )
+        confidences["header.account_number"] = base_conf
     else:
         confidences["header.account_number"] = 0.0
 
-    # Account type - often not explicitly stated
-    # TODO: Assumed account_type detection is optional. Revisit if needed.
+    # Account type detection not implemented - field will have 0.0 confidence if not found
     confidences["header.account_type"] = 0.0 if result["header"]["account_type"] is None else 0.95
 
     # Extract dates for statement period
@@ -270,7 +299,7 @@ def transform_bank_statement(
     confidences["transactions"] = transaction_confidences
 
     # Summary fields - often derived or not present
-    # TODO: Assumed summary extraction is optional. Revisit if explicit extraction needed.
+    # Summary fields not extracted from OCR - these are typically derived values
     confidences["summary.total_credits"] = 0.0
     confidences["summary.total_debits"] = 0.0
     confidences["summary.net_change"] = 0.0
@@ -280,7 +309,8 @@ def transform_bank_statement(
 
 def transform_w2(
     elements: list,
-    raw_text: str
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
 ) -> tuple[dict, dict[str, Any]]:
     """
     Transform dots.ocr output to W2 form schema.
@@ -288,6 +318,7 @@ def transform_w2(
     Args:
         elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) for position boost
 
     Returns:
         Tuple of (structured_data, field_confidences)
@@ -320,8 +351,18 @@ def transform_w2(
     ssn = extract_ssn(raw_text)
     result["employee"]["ssn"] = ssn
     if ssn:
+        matching_element = _find_element_with_text(elements, ssn[-4:])
         base_conf = _get_element_confidence(elements, ssn[-4:], 0.90)
-        confidences["employee.ssn"] = apply_format_boost(ssn, "employee.ssn", base_conf)
+        base_conf = apply_format_boost(ssn, "employee.ssn", base_conf)
+        if matching_element and page_dims:
+            base_conf = apply_position_boost(
+                "employee.ssn",
+                matching_element.get("bbox"),
+                page_dims,
+                "W2",
+                base_conf
+            )
+        confidences["employee.ssn"] = base_conf
     else:
         confidences["employee.ssn"] = 0.0
 
@@ -329,8 +370,18 @@ def transform_w2(
     ein = extract_ein(raw_text)
     result["employer"]["ein"] = ein
     if ein:
+        matching_element = _find_element_with_text(elements, ein)
         base_conf = _get_element_confidence(elements, ein, 0.90)
-        confidences["employer.ein"] = apply_format_boost(ein, "employer.ein", base_conf)
+        base_conf = apply_format_boost(ein, "employer.ein", base_conf)
+        if matching_element and page_dims:
+            base_conf = apply_position_boost(
+                "employer.ein",
+                matching_element.get("bbox"),
+                page_dims,
+                "W2",
+                base_conf
+            )
+        confidences["employer.ein"] = base_conf
     else:
         confidences["employer.ein"] = 0.0
 
@@ -385,7 +436,8 @@ def transform_w2(
 
 def transform_1099(
     elements: list,
-    raw_text: str
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
 ) -> tuple[dict, dict[str, Any]]:
     """
     Transform dots.ocr output to 1099 form schema.
@@ -393,6 +445,7 @@ def transform_1099(
     Args:
         elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) for position boost
 
     Returns:
         Tuple of (structured_data, field_confidences)
@@ -466,7 +519,8 @@ def transform_1099(
 
 def transform_generic(
     elements: list,
-    raw_text: str
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
 ) -> tuple[dict, dict[str, Any]]:
     """
     Transform dots.ocr output to generic document schema.
@@ -476,6 +530,7 @@ def transform_generic(
     Args:
         elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) - unused for generic
 
     Returns:
         Tuple of (structured_data, field_confidences)
@@ -542,7 +597,8 @@ TRANSFORMERS = {
 def transform_to_document_schema(
     doc_type: str,
     layout_elements: list,
-    raw_text: str
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
 ) -> tuple[dict, dict[str, Any]]:
     """
     Transform raw dots.ocr output to document-specific schema.
@@ -555,13 +611,14 @@ def transform_to_document_schema(
         doc_type: Document type (W2, bank_statement, 1099-*, etc.)
         layout_elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) for position boost
 
     Returns:
         Tuple of (data_dict, confidence_dict) where confidence_dict
         contains {"overall": float, "fields": dict}
     """
     transformer = TRANSFORMERS.get(doc_type, transform_generic)
-    data, field_confidences = transformer(layout_elements, raw_text)
+    data, field_confidences = transformer(layout_elements, raw_text, page_dims)
 
     # Apply cross-reference boost
     field_confidences = apply_cross_reference_boost(data, field_confidences, doc_type)

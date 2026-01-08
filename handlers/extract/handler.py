@@ -304,11 +304,23 @@ async def extract(
         p.get("raw_text", "") for p in page_results
     )
 
+    # Infer page dimensions from element bboxes for position boost
+    page_dims = None
+    for element in all_elements:
+        bbox = element.get("bbox")
+        if bbox and len(bbox) >= 4:
+            # Use max x2, y2 as page dimensions estimate
+            if page_dims is None:
+                page_dims = (bbox[2], bbox[3])
+            else:
+                page_dims = (max(page_dims[0], bbox[2]), max(page_dims[1], bbox[3]))
+
     # Transform raw OCR to document-specific schema with per-field confidence
     structured_data, confidence = transform_to_document_schema(
         doc_type=doc_type,
         layout_elements=all_elements,
-        raw_text=combined_text
+        raw_text=combined_text,
+        page_dims=page_dims
     )
 
     return {

@@ -27,11 +27,11 @@ CRITICAL_FIELDS: dict[str, list[str]] = {
         "boxes.box2_federal_withheld",
         "employee.ssn",
     ],
-    "1099-INT": ["recipient.tin", "boxes.box1_interest"],
-    "1099-DIV": ["recipient.tin", "boxes.box1a_dividends"],
-    "1099-MISC": ["recipient.tin", "boxes.box7_nonemployee"],
-    "1099-NEC": ["recipient.tin", "boxes.box1_nonemployee"],
-    "1099-R": ["recipient.tin", "boxes.box1_gross_distribution"],
+    "1099-INT": ["recipient.tin", "boxes.box1"],
+    "1099-DIV": ["recipient.tin", "boxes.box1"],
+    "1099-MISC": ["recipient.tin", "boxes.box1"],
+    "1099-NEC": ["recipient.tin", "boxes.box1"],
+    "1099-R": ["recipient.tin", "boxes.box1"],
     "invoice": ["total", "invoice_number", "invoice_date"],
 }
 
@@ -169,17 +169,21 @@ def apply_position_boost(
     if not bbox or not page_dims:
         return base_conf
 
+    page_width, page_height = page_dims
+
+    # Guard against zero dimensions
+    if page_width <= 0 or page_height <= 0:
+        return base_conf
+
     regions = EXPECTED_REGIONS.get(doc_type, {})
     expected = regions.get(field_name)
 
     if not expected:
         return base_conf
 
-    page_width, page_height = page_dims
-
     # Normalize bbox coordinates
-    x_normalized = bbox[0] / page_width if page_width > 0 else 0
-    y_normalized = bbox[1] / page_height if page_height > 0 else 0
+    x_normalized = bbox[0] / page_width
+    y_normalized = bbox[1] / page_height
 
     # Check if within expected region
     x_ok = (
@@ -277,12 +281,11 @@ def _cross_ref_w2(
     Checks if SS wages >= SS tax (6.2% relationship)
     Checks if Medicare wages >= Medicare tax (1.45% relationship)
     """
-    # TODO: Assumed basic cross-reference checks. Revisit if more complex validation needed.
-    wages = data.get("wages", {}) or data.get("boxes", {})
+    boxes = data.get("boxes", {})
 
     try:
-        ss_wages = float(wages.get("box3_ss_wages") or 0)
-        ss_tax = float(wages.get("box4_ss_tax") or wages.get("box4_ss_withheld") or 0)
+        ss_wages = float(boxes.get("box3_ss_wages") or 0)
+        ss_tax = float(boxes.get("box4_ss_withheld") or 0)
 
         # SS tax should be ~6.2% of wages
         if ss_wages > 0 and abs(ss_tax - (ss_wages * 0.062)) < 10:
@@ -292,11 +295,8 @@ def _cross_ref_w2(
                     if isinstance(current, (int, float)):
                         field_confidences[field] = min(current + 0.10, 1.0)
 
-        medicare_wages = float(wages.get("box5_medicare_wages") or 0)
-        medicare_tax = float(
-            wages.get("box6_medicare_tax") or
-            wages.get("box6_medicare_withheld") or 0
-        )
+        medicare_wages = float(boxes.get("box5_medicare_wages") or 0)
+        medicare_tax = float(boxes.get("box6_medicare_withheld") or 0)
 
         # Medicare tax should be ~1.45% of wages
         if medicare_wages > 0 and abs(medicare_tax - (medicare_wages * 0.0145)) < 10:
