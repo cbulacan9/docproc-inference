@@ -35,12 +35,14 @@ class RunPodClient:
         api_key: str,
         classify_endpoint: str,
         extract_endpoint: str,
+        extract_chandra_endpoint: str = "",
         timeout: int = 120,
         max_retries: int = 3
     ):
         self.api_key = api_key
         self.classify_endpoint = classify_endpoint
         self.extract_endpoint = extract_endpoint
+        self.extract_chandra_endpoint = extract_chandra_endpoint
         self.timeout = timeout
         self.max_retries = max_retries
 
@@ -105,14 +107,51 @@ class RunPodClient:
             }
         )
 
+    async def extract_chandra(
+        self,
+        image_urls: list[str],
+        doc_type: str
+    ) -> RunPodResponse:
+        """
+        Call Chandra extraction endpoint (evaluation).
+
+        Args:
+            image_urls: ShareFile pre-signed URLs
+            doc_type: Document type for prompt selection
+
+        Returns:
+            RunPodResponse with extraction result from Chandra
+        """
+        if not self.extract_chandra_endpoint:
+            return RunPodResponse(
+                success=False,
+                data=None,
+                error="Chandra endpoint not configured",
+                latency_ms=0
+            )
+
+        return await self._call(
+            endpoint_id=self.extract_chandra_endpoint,
+            payload={
+                "image_urls": image_urls,
+                "doc_type": doc_type
+            }
+        )
+
     async def health_check(self) -> dict:
-        """Check health of both endpoints."""
+        """Check health of all configured endpoints."""
         results = {}
 
-        for name, endpoint_id in [
+        endpoints = [
             ("classify", self.classify_endpoint),
             ("extract", self.extract_endpoint)
-        ]:
+        ]
+
+        # Include Chandra endpoint if configured
+        if self.extract_chandra_endpoint:
+            endpoints.append(("extract_chandra", self.extract_chandra_endpoint))
+
+        for name, endpoint_id in endpoints:
             try:
                 url = f"{RUNPOD_API_BASE}/{endpoint_id}/health"
                 response = await self._client.get(url, timeout=10)
