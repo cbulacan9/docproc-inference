@@ -1,0 +1,18 @@
+# Chandra Evaluation Configuration
+# Run: python scripts/evaluate_chandra.py --config scripts/eval_config.yaml
+
+output_path: "evaluation_results.json"
+
+test_cases:
+  # Bank Statement - Skewed Image Test (Unity Bank March 2022)
+  - name: "Bank Statement - Unity Bank March 2022 (Skewed)"
+    doc_type: "bank_statement"
+    image_urls:
+      - "http://localhost:8080/STATEMENT%20MARCH%2022.jpeg"
+    ground_truth:
+      header:
+        bank_name: "Unity Bank"
+        account_number: "****3473"
+        account_type: "Small Business Checking"
+        statement_period: "03/31/2022"
+        ending_balance: 10942.80
