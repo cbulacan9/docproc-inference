@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .middleware.auth import create_auth_dependency
 from .middleware.logging import RequestLoggingMiddleware
-from .routes import classify, extract, health
+from .routes import classify, extract, extract_chandra, health
 from .services.runpod_client import RunPodClient
 
 # Configure logging
@@ -27,12 +27,15 @@ async def lifespan(app: FastAPI):
     logger.info("Gateway server starting...")
     logger.info(f"Classify endpoint: {settings.runpod_classify_endpoint}")
     logger.info(f"Extract endpoint: {settings.runpod_extract_endpoint}")
+    if settings.runpod_extract_chandra_endpoint:
+        logger.info(f"Extract Chandra endpoint: {settings.runpod_extract_chandra_endpoint}")
 
     # Create shared RunPod client
     app.state.runpod_client = RunPodClient(
         api_key=settings.runpod_api_key,
         classify_endpoint=settings.runpod_classify_endpoint,
         extract_endpoint=settings.runpod_extract_endpoint,
+        extract_chandra_endpoint=settings.runpod_extract_chandra_endpoint,
         timeout=settings.runpod_timeout,
         max_retries=settings.runpod_max_retries
     )
@@ -81,6 +84,7 @@ def create_app() -> FastAPI:
     # Inference routes (with auth via include_router pattern)
     app.include_router(classify.router, dependencies=[auth_dependency])
     app.include_router(extract.router, dependencies=[auth_dependency])
+    app.include_router(extract_chandra.router, dependencies=[auth_dependency])
 
     return app
 
