@@ -1,0 +1,38 @@
+# Test Images Directory
+
+Place test document images here for evaluation.
+
+## Serving Images Locally
+
+Start a simple HTTP server:
+
+```bash
+cd test_images
+python -m http.server 8080
+```
+
+Images will be accessible at: http://localhost:8080/filename.png
+
+## Recommended Test Images
+
+- bank_statement_good.png
+- bank_statement_blurry.png
+- bank_statement_skewed.png
+- w2_good.png
+- w2_blurry.png
+- 1099_int_good.png
+
+## Creating Degraded Test Images
+
+Use ImageMagick to create test variants:
+
+```bash
+# Blur
+convert original.png -blur 0x3 blurry.png
+
+# Skew
+convert original.png -rotate 15 skewed.png
+
+# Low contrast
+convert original.png -brightness-contrast -20x-30 lowcontrast.png
+```
