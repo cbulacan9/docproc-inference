@@ -4,10 +4,23 @@ Transform raw dots.ocr output to document-specific schemas.
 dots.ocr provides generic layout elements with bounding boxes and text.
 These transformers convert that to structured fields matching our
 document type schemas (W2, bank_statement, etc.).
+
+Each transformer returns a tuple of (data, field_confidences) where:
+- data: Structured document fields
+- field_confidences: Dict with dot-notation keys mapping to confidence scores
 """
 
 import re
 from typing import Any
+
+from confidence import (
+    apply_cross_reference_boost,
+    apply_format_boost,
+    apply_position_boost,
+    calculate_overall_confidence,
+    get_base_confidence,
+    get_critical_fields,
+)
 
 
 def extract_amounts(text: str) -> list[dict]:
@@ -100,16 +113,54 @@ def extract_ein(text: str) -> str | None:
     return None
 
 
-def transform_bank_statement(elements: list, raw_text: str) -> dict:
+def _get_element_confidence(
+    elements: list,
+    search_text: str,
+    default: float = 0.85
+) -> float:
+    """
+    Find confidence for an element containing specific text.
+
+    Args:
+        elements: List of layout elements
+        search_text: Text to search for (case-insensitive)
+        default: Default confidence if not found
+
+    Returns:
+        Confidence score from matching element
+    """
+    search_lower = search_text.lower()
+    for element in elements:
+        el_text = element.get("text", "").lower()
+        if search_lower in el_text:
+            return get_base_confidence(element)
+    return default
+
+
+def _find_element_with_text(elements: list, search_text: str) -> dict | None:
+    """Find the element containing the given text."""
+    search_lower = search_text.lower()
+    for el in elements:
+        if search_lower in el.get("text", "").lower():
+            return el
+    return None
+
+
+def transform_bank_statement(
+    elements: list,
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
+) -> tuple[dict, dict[str, Any]]:
     """
     Transform dots.ocr output to bank statement schema.
 
     Args:
         elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) for position boost
 
     Returns:
-        Structured data matching the bank_statement schema
+        Tuple of (structured_data, field_confidences)
     """
     result = {
         "header": {
@@ -128,6 +179,8 @@ def transform_bank_statement(elements: list, raw_text: str) -> dict:
         }
     }
 
+    confidences: dict[str, Any] = {}
+
     # Extract common bank names
     bank_patterns = [
         r'(Chase|Bank of America|Wells Fargo|Citi|Capital One|PNC|TD Bank|US Bank)',
@@ -137,7 +190,22 @@ def transform_bank_statement(elements: list, raw_text: str) -> dict:
         match = re.search(pattern, raw_text, re.IGNORECASE)
         if match:
             result["header"]["bank_name"] = match.group(1)
+            matching_element = _find_element_with_text(elements, match.group(1))
+            base_conf = _get_element_confidence(elements, match.group(1))
+            base_conf = apply_format_boost(match.group(1), "header.bank_name", base_conf)
+            if matching_element and page_dims:
+                base_conf = apply_position_boost(
+                    "header.bank_name",
+                    matching_element.get("bbox"),
+                    page_dims,
+                    "bank_statement",
+                    base_conf
+                )
+            confidences["header.bank_name"] = base_conf
             break
+
+    if result["header"]["bank_name"] is None:
+        confidences["header.bank_name"] = 0.0
 
     # Extract account number (masked)
     acct_match = re.search(
@@ -147,25 +215,65 @@ def transform_bank_statement(elements: list, raw_text: str) -> dict:
     )
     if acct_match:
         result["header"]["account_number"] = f"****{acct_match.group(1)[-4:]}"
+        matching_element = _find_element_with_text(elements, acct_match.group(0))
+        base_conf = _get_element_confidence(elements, acct_match.group(0))
+        base_conf = apply_format_boost(
+            result["header"]["account_number"], "header.account_number", base_conf
+        )
+        if matching_element and page_dims:
+            base_conf = apply_position_boost(
+                "header.account_number",
+                matching_element.get("bbox"),
+                page_dims,
+                "bank_statement",
+                base_conf
+            )
+        confidences["header.account_number"] = base_conf
+    else:
+        confidences["header.account_number"] = 0.0
+
+    # Account type detection not implemented - field will have 0.0 confidence if not found
+    confidences["header.account_type"] = 0.0 if result["header"]["account_type"] is None else 0.95
 
     # Extract dates for statement period
     dates = extract_dates(raw_text)
     if len(dates) >= 2:
         result["header"]["statement_period"] = f"{dates[0]} - {dates[1]}"
+        base_conf = _get_element_confidence(elements, dates[0], 0.90)
+        confidences["header.statement_period"] = apply_format_boost(
+            dates[0], "header.statement_period", base_conf
+        )
+    else:
+        confidences["header.statement_period"] = 0.0
 
     # Look for beginning/ending balance patterns
     for element in elements:
         text = element.get("text", "").lower()
+        el_conf = get_base_confidence(element)
+
         if "beginning" in text or "opening" in text:
             amts = extract_amounts(element.get("text", ""))
             if amts:
                 result["header"]["beginning_balance"] = amts[-1]["value"]
+                confidences["header.beginning_balance"] = apply_format_boost(
+                    amts[-1]["raw"], "header.beginning_balance", el_conf
+                )
         elif "ending" in text or "closing" in text:
             amts = extract_amounts(element.get("text", ""))
             if amts:
                 result["header"]["ending_balance"] = amts[-1]["value"]
+                confidences["header.ending_balance"] = apply_format_boost(
+                    amts[-1]["raw"], "header.ending_balance", el_conf
+                )
+
+    # Set 0.0 confidence for missing balance fields
+    if "header.beginning_balance" not in confidences:
+        confidences["header.beginning_balance"] = 0.0
+    if "header.ending_balance" not in confidences:
+        confidences["header.ending_balance"] = 0.0
 
     # Extract transactions (look for table-like patterns)
+    transaction_confidences = []
     transaction_pattern = r'(\d{1,2}/\d{1,2})\s+(.+?)\s+(-?\$?[\d,]+\.?\d*)\s*$'
     for match in re.finditer(transaction_pattern, raw_text, re.MULTILINE):
         date, desc, amount = match.groups()
@@ -176,22 +284,44 @@ def transform_bank_statement(elements: list, raw_text: str) -> dict:
                 "description": desc.strip(),
                 "amount": amt_value
             })
+
+            # Get base confidence from nearest element
+            base_conf = _get_element_confidence(elements, date, 0.85)
+
+            transaction_confidences.append({
+                "date": apply_format_boost(date, "transactions.date", base_conf),
+                "description": base_conf,  # No format boost for description
+                "amount": apply_format_boost(amount, "transactions.amount", base_conf)
+            })
         except ValueError:
             continue
 
-    return result
+    confidences["transactions"] = transaction_confidences
+
+    # Summary fields - often derived or not present
+    # Summary fields not extracted from OCR - these are typically derived values
+    confidences["summary.total_credits"] = 0.0
+    confidences["summary.total_debits"] = 0.0
+    confidences["summary.net_change"] = 0.0
+
+    return result, confidences
 
 
-def transform_w2(elements: list, raw_text: str) -> dict:
+def transform_w2(
+    elements: list,
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
+) -> tuple[dict, dict[str, Any]]:
     """
     Transform dots.ocr output to W2 form schema.
 
     Args:
         elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) for position boost
 
     Returns:
-        Structured data matching the W2 schema
+        Tuple of (structured_data, field_confidences)
     """
     result = {
         "employee": {
@@ -204,64 +334,121 @@ def transform_w2(elements: list, raw_text: str) -> dict:
             "ein": None,
             "address": None
         },
-        "wages": {
+        "boxes": {
             "box1_wages": None,
-            "box2_federal_tax": None,
+            "box2_federal_withheld": None,
             "box3_ss_wages": None,
-            "box4_ss_tax": None,
+            "box4_ss_withheld": None,
             "box5_medicare_wages": None,
-            "box6_medicare_tax": None
+            "box6_medicare_withheld": None
         },
         "tax_year": None
     }
 
+    confidences: dict[str, Any] = {}
+
     # Extract SSN
-    result["employee"]["ssn"] = extract_ssn(raw_text)
+    ssn = extract_ssn(raw_text)
+    result["employee"]["ssn"] = ssn
+    if ssn:
+        matching_element = _find_element_with_text(elements, ssn[-4:])
+        base_conf = _get_element_confidence(elements, ssn[-4:], 0.90)
+        base_conf = apply_format_boost(ssn, "employee.ssn", base_conf)
+        if matching_element and page_dims:
+            base_conf = apply_position_boost(
+                "employee.ssn",
+                matching_element.get("bbox"),
+                page_dims,
+                "W2",
+                base_conf
+            )
+        confidences["employee.ssn"] = base_conf
+    else:
+        confidences["employee.ssn"] = 0.0
 
     # Extract EIN
-    result["employer"]["ein"] = extract_ein(raw_text)
+    ein = extract_ein(raw_text)
+    result["employer"]["ein"] = ein
+    if ein:
+        matching_element = _find_element_with_text(elements, ein)
+        base_conf = _get_element_confidence(elements, ein, 0.90)
+        base_conf = apply_format_boost(ein, "employer.ein", base_conf)
+        if matching_element and page_dims:
+            base_conf = apply_position_boost(
+                "employer.ein",
+                matching_element.get("bbox"),
+                page_dims,
+                "W2",
+                base_conf
+            )
+        confidences["employer.ein"] = base_conf
+    else:
+        confidences["employer.ein"] = 0.0
+
+    # Employee/Employer names - set to 0.0 if not found
+    confidences["employee.name"] = 0.0
+    confidences["employee.address"] = 0.0
+    confidences["employer.name"] = 0.0
+    confidences["employer.address"] = 0.0
 
     # Extract tax year (look for 4-digit year near "W-2" or "Wage")
     year_match = re.search(r'(?:W-2|Wage)[^\d]*(\d{4})', raw_text, re.IGNORECASE)
     if year_match:
         result["tax_year"] = year_match.group(1)
+        base_conf = _get_element_confidence(elements, year_match.group(1), 0.95)
+        confidences["tax_year"] = base_conf
     else:
         # Try to find any 4-digit year in 20xx range
         year_match = re.search(r'\b(20\d{2})\b', raw_text)
         if year_match:
             result["tax_year"] = year_match.group(1)
+            confidences["tax_year"] = 0.80  # Lower confidence for generic year match
+        else:
+            confidences["tax_year"] = 0.0
 
     # Extract wage boxes (look for box labels)
     box_patterns = {
         "box1_wages": r'(?:Box\s*1|Wages,?\s*tips)[^\d]*\$?([\d,]+\.?\d*)',
-        "box2_federal_tax": r'(?:Box\s*2|Federal\s*income\s*tax)[^\d]*\$?([\d,]+\.?\d*)',
+        "box2_federal_withheld": r'(?:Box\s*2|Federal\s*income\s*tax)[^\d]*\$?([\d,]+\.?\d*)',
         "box3_ss_wages": r'(?:Box\s*3|Social\s*security\s*wages)[^\d]*\$?([\d,]+\.?\d*)',
-        "box4_ss_tax": r'(?:Box\s*4|Social\s*security\s*tax)[^\d]*\$?([\d,]+\.?\d*)',
+        "box4_ss_withheld": r'(?:Box\s*4|Social\s*security\s*tax)[^\d]*\$?([\d,]+\.?\d*)',
         "box5_medicare_wages": r'(?:Box\s*5|Medicare\s*wages)[^\d]*\$?([\d,]+\.?\d*)',
-        "box6_medicare_tax": r'(?:Box\s*6|Medicare\s*tax)[^\d]*\$?([\d,]+\.?\d*)',
+        "box6_medicare_withheld": r'(?:Box\s*6|Medicare\s*tax)[^\d]*\$?([\d,]+\.?\d*)',
     }
 
     for field, pattern in box_patterns.items():
         match = re.search(pattern, raw_text, re.IGNORECASE)
         if match:
             try:
-                result["wages"][field] = float(match.group(1).replace(',', ''))
+                value = float(match.group(1).replace(',', ''))
+                result["boxes"][field] = value
+                base_conf = _get_element_confidence(elements, match.group(0)[:20], 0.90)
+                confidences[f"boxes.{field}"] = apply_format_boost(
+                    match.group(1), f"boxes.{field}", base_conf
+                )
             except ValueError:
-                continue
+                confidences[f"boxes.{field}"] = 0.0
+        else:
+            confidences[f"boxes.{field}"] = 0.0
 
-    return result
+    return result, confidences
 
 
-def transform_1099(elements: list, raw_text: str) -> dict:
+def transform_1099(
+    elements: list,
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
+) -> tuple[dict, dict[str, Any]]:
     """
     Transform dots.ocr output to 1099 form schema.
 
     Args:
         elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) for position boost
 
     Returns:
-        Structured data matching the 1099 schema
+        Tuple of (structured_data, field_confidences)
     """
     result = {
         "recipient": {
@@ -274,23 +461,45 @@ def transform_1099(elements: list, raw_text: str) -> dict:
             "tin": None,
             "address": None
         },
-        "amounts": {},
+        "boxes": {},
         "tax_year": None,
         "form_type": None
     }
+
+    confidences: dict[str, Any] = {}
 
     # Detect 1099 type
     type_match = re.search(r'1099-?(INT|DIV|MISC|NEC|R|G|K)', raw_text, re.IGNORECASE)
     if type_match:
         result["form_type"] = f"1099-{type_match.group(1).upper()}"
+        confidences["form_type"] = 0.95
+    else:
+        confidences["form_type"] = 0.0
 
-    # Extract TINs
-    result["recipient"]["tin"] = extract_ssn(raw_text)
+    # Extract recipient TIN
+    tin = extract_ssn(raw_text)
+    result["recipient"]["tin"] = tin
+    if tin:
+        base_conf = _get_element_confidence(elements, tin[-4:], 0.90)
+        confidences["recipient.tin"] = apply_format_boost(tin, "recipient.tin", base_conf)
+    else:
+        confidences["recipient.tin"] = 0.0
+
+    # Set default confidences for name/address fields
+    confidences["recipient.name"] = 0.0
+    confidences["recipient.address"] = 0.0
+    confidences["payer.name"] = 0.0
+    confidences["payer.tin"] = 0.0
+    confidences["payer.address"] = 0.0
 
     # Extract tax year
     year_match = re.search(r'\b(20\d{2})\b', raw_text)
     if year_match:
         result["tax_year"] = year_match.group(1)
+        base_conf = _get_element_confidence(elements, year_match.group(1), 0.90)
+        confidences["tax_year"] = base_conf
+    else:
+        confidences["tax_year"] = 0.0
 
     # Extract amounts from the document
     all_amounts = extract_amounts(raw_text)
@@ -298,12 +507,21 @@ def transform_1099(elements: list, raw_text: str) -> dict:
         # Sort by value descending to get most significant amounts
         sorted_amounts = sorted(all_amounts, key=lambda x: x["value"], reverse=True)
         for i, amt in enumerate(sorted_amounts[:5]):
-            result["amounts"][f"amount_{i+1}"] = amt["value"]
+            box_key = f"box{i+1}"
+            result["boxes"][box_key] = amt["value"]
+            base_conf = _get_element_confidence(elements, amt["raw"], 0.85)
+            confidences[f"boxes.{box_key}"] = apply_format_boost(
+                amt["raw"], f"boxes.{box_key}", base_conf
+            )
 
-    return result
+    return result, confidences
 
 
-def transform_generic(elements: list, raw_text: str) -> dict:
+def transform_generic(
+    elements: list,
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
+) -> tuple[dict, dict[str, Any]]:
     """
     Transform dots.ocr output to generic document schema.
 
@@ -312,13 +530,24 @@ def transform_generic(elements: list, raw_text: str) -> dict:
     Args:
         elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) - unused for generic
 
     Returns:
-        Generic structured data with extracted fields
+        Tuple of (structured_data, field_confidences)
     """
+    amounts = extract_amounts(raw_text)
+    dates = extract_dates(raw_text)
+
     result = {
-        "amounts": extract_amounts(raw_text),
-        "dates": extract_dates(raw_text),
+        "amounts": amounts,
+        "dates": dates,
+        "text_blocks": [],
+        "tables": []
+    }
+
+    confidences: dict[str, Any] = {
+        "amounts": [],
+        "dates": [],
         "text_blocks": [],
         "tables": []
     }
@@ -326,49 +555,76 @@ def transform_generic(elements: list, raw_text: str) -> dict:
     # Group elements by category
     for element in elements:
         category = element.get("category", "Text")
+        el_conf = get_base_confidence(element)
+
         if category == "Table":
             result["tables"].append({
                 "bbox": element.get("bbox"),
                 "text": element.get("text", "")
             })
+            confidences["tables"].append({"text": el_conf})
         else:
             result["text_blocks"].append({
                 "category": category,
                 "text": element.get("text", ""),
-                "confidence": element.get("confidence", 0.9)
+                "confidence": el_conf
             })
+            confidences["text_blocks"].append({"text": el_conf})
 
-    return result
+    # Add confidence for extracted amounts
+    for amt in amounts:
+        confidences["amounts"].append({"value": 0.85})
+
+    # Add confidence for extracted dates
+    for _ in dates:
+        confidences["dates"].append({"value": 0.85})
+
+    return result, confidences
+
+
+# Transformer registry
+TRANSFORMERS = {
+    "bank_statement": transform_bank_statement,
+    "W2": transform_w2,
+    "1099-INT": transform_1099,
+    "1099-DIV": transform_1099,
+    "1099-MISC": transform_1099,
+    "1099-NEC": transform_1099,
+    "1099-R": transform_1099,
+}
 
 
 def transform_to_document_schema(
     doc_type: str,
     layout_elements: list,
-    raw_text: str
-) -> dict:
+    raw_text: str,
+    page_dims: tuple[int, int] | None = None
+) -> tuple[dict, dict[str, Any]]:
     """
     Transform raw dots.ocr output to document-specific schema.
 
     Dispatcher function that routes to the appropriate transformer
-    based on document type.
+    based on document type. Returns both structured data and
+    per-field confidence scores.
 
     Args:
         doc_type: Document type (W2, bank_statement, 1099-*, etc.)
         layout_elements: List of layout elements from dots.ocr
         raw_text: Combined raw text from all pages
+        page_dims: Optional page dimensions (width, height) for position boost
 
     Returns:
-        Structured data matching the document type schema
+        Tuple of (data_dict, confidence_dict) where confidence_dict
+        contains {"overall": float, "fields": dict}
     """
-    transformers = {
-        "bank_statement": transform_bank_statement,
-        "W2": transform_w2,
-        "1099-INT": transform_1099,
-        "1099-DIV": transform_1099,
-        "1099-MISC": transform_1099,
-        "1099-NEC": transform_1099,
-        "1099-R": transform_1099,
-    }
+    transformer = TRANSFORMERS.get(doc_type, transform_generic)
+    data, field_confidences = transformer(layout_elements, raw_text, page_dims)
 
-    transformer = transformers.get(doc_type, transform_generic)
-    return transformer(layout_elements, raw_text)
+    # Apply cross-reference boost
+    field_confidences = apply_cross_reference_boost(data, field_confidences, doc_type)
+
+    # Calculate overall confidence
+    critical_fields = get_critical_fields(doc_type)
+    overall = calculate_overall_confidence(field_confidences, critical_fields)
+
+    return data, {"overall": overall, "fields": field_confidences}

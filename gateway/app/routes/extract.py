@@ -30,13 +30,23 @@ class ExtractRequest(BaseModel):
     )
 
 
+class ConfidenceResponse(BaseModel):
+    """Per-field confidence scores."""
+    overall: float = Field(..., ge=0.0, le=1.0, description="Overall extraction confidence")
+    fields: dict[str, Any] = Field(
+        ...,
+        description="Per-field confidence scores using dot notation keys"
+    )
+
+
 class ExtractResponse(BaseModel):
     """Extraction response body."""
     data: dict[str, Any] = Field(..., description="Extracted structured data")
-    confidence: dict[str, Any] = Field(..., description="Confidence scores")
+    confidence: ConfidenceResponse = Field(..., description="Confidence scores")
     doc_type: str = Field(..., description="Document type used for extraction")
     page_count: int = Field(..., description="Number of pages processed")
     latency_ms: int = Field(..., description="Inference latency in milliseconds")
+    model: str = Field(..., description="Model used for extraction")
 
 
 def get_runpod_client(request: Request) -> RunPodClient:
@@ -73,10 +83,18 @@ async def extract_document(
     # Extract result
     data = response.data or {}
 
+    # Build confidence response
+    raw_confidence = data.get("confidence", {})
+    confidence = ConfidenceResponse(
+        overall=raw_confidence.get("overall", 0.5),
+        fields=raw_confidence.get("fields", {})
+    )
+
     return ExtractResponse(
         data=data.get("data", {}),
-        confidence=data.get("confidence", {}),
+        confidence=confidence,
         doc_type=data.get("doc_type", body.doc_type),
         page_count=data.get("page_count", len(body.image_urls)),
-        latency_ms=response.latency_ms
+        latency_ms=response.latency_ms,
+        model=data.get("model", "dots-ocr")
     )

@@ -236,29 +236,6 @@ def parse_dots_ocr_output(raw_output: str) -> dict:
     }
 
 
-def estimate_confidence_from_elements(elements: list) -> float:
-    """
-    Estimate overall confidence from layout elements.
-
-    Args:
-        elements: List of layout elements from dots.ocr
-
-    Returns:
-        Average confidence score
-    """
-    if not elements:
-        return 0.5
-
-    confidences = [
-        el.get("confidence", 0.85)
-        for el in elements
-        if isinstance(el, dict)
-    ]
-
-    if not confidences:
-        return 0.85
-
-    return sum(confidences) / len(confidences)
 
 
 async def extract(
@@ -327,15 +304,24 @@ async def extract(
         p.get("raw_text", "") for p in page_results
     )
 
-    # Transform raw OCR to document-specific schema
-    structured_data = transform_to_document_schema(
+    # Infer page dimensions from element bboxes for position boost
+    page_dims = None
+    for element in all_elements:
+        bbox = element.get("bbox")
+        if bbox and len(bbox) >= 4:
+            # Use max x2, y2 as page dimensions estimate
+            if page_dims is None:
+                page_dims = (bbox[2], bbox[3])
+            else:
+                page_dims = (max(page_dims[0], bbox[2]), max(page_dims[1], bbox[3]))
+
+    # Transform raw OCR to document-specific schema with per-field confidence
+    structured_data, confidence = transform_to_document_schema(
         doc_type=doc_type,
         layout_elements=all_elements,
-        raw_text=combined_text
+        raw_text=combined_text,
+        page_dims=page_dims
     )
-
-    # Calculate confidence
-    overall_confidence = estimate_confidence_from_elements(all_elements)
 
     return {
         "data": structured_data,
@@ -344,11 +330,7 @@ async def extract(
             "all_elements": all_elements,
             "combined_text": combined_text
         },
-        "confidence": {
-            "overall": overall_confidence,
-            "page_count": len(page_results),
-            "element_count": len(all_elements)
-        },
+        "confidence": confidence,
         "page_count": len(page_results)
     }
 
@@ -370,9 +352,17 @@ def handler(job: dict) -> dict:
     {
         "data": { ... structured fields per doc_type schema ... },
         "raw_ocr": { ... raw dots.ocr output ... },
-        "confidence": { "overall": 0.95, ... },
+        "confidence": {
+            "overall": 0.89,
+            "fields": {
+                "header.bank_name": 0.99,
+                "transactions": [{"date": 0.98, "description": 0.85, "amount": 0.97}],
+                ...
+            }
+        },
         "page_count": 2,
         "doc_type": "bank_statement",
+        "model": "rednote-hilab/dots.ocr",
         "latency_ms": 1234
     }
     """
@@ -398,7 +388,7 @@ def handler(job: dict) -> dict:
 
         logger.info(
             f"Extracted {doc_type} ({result['page_count']} pages, "
-            f"{result['confidence']['element_count']} elements) "
+            f"confidence={result['confidence']['overall']:.2f}) "
             f"in {result['latency_ms']}ms"
         )
 
